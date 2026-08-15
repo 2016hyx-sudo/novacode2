@@ -17,6 +17,7 @@ from .models import (
     ToolState,
     Trajectory,
     WorkspaceExpected,
+    utcnow,
 )
 from .state_merge import deterministic_fold_delta, merge_task_delta, merge_tool_delta
 from .token_counter import TokenCounter
@@ -86,6 +87,7 @@ class StructuredContext:
         self.config = config or StructuredContextConfig()
         self.prefix_hash = prefix_hash
         self.tools_hash = tools_hash
+        self._trace = None
         self._checkpoint_callback = None
         self._pending_batch_calls: list[ToolCall] = []
         self._current_group: InteractionGroup | None = None
@@ -411,8 +413,8 @@ class StructuredContext:
     def _maybe_fold(self) -> None:
         if self.trajectory.epoch_id < 0:
             return
-        estimate = self._estimate_current()
-        if estimate < self.config.trigger_tokens():
+        before = self._estimate_layers()
+        if before["total"] < self.config.trigger_tokens():
             return
         eligible = [
             group
@@ -438,6 +440,9 @@ class StructuredContext:
         self.tool_state = ToolState.from_dict(tool_dict)
 
         folded_ids = [group.group_id for group in eligible]
+        folded_tokens = sum(group.token_count for group in eligible)
+        task_delta_tokens = self.token_counter.estimate_text(json.dumps(task_delta, ensure_ascii=False))
+        tool_delta_tokens = self.token_counter.estimate_text(json.dumps(tool_delta, ensure_ascii=False))
         self.trajectory.groups = [group for group in self.trajectory.groups if group.group_id not in folded_ids]
         self.trajectory.epoch_id = old_epoch + 1
         self.session.epoch_id = self.trajectory.epoch_id
@@ -455,9 +460,77 @@ class StructuredContext:
         )
         self.event_log.append("trajectory_folded", {"folded_group_ids": folded_ids})
 
+        after = self._estimate_layers()
+        compression_ratio = 0.0
+        if folded_tokens > 0:
+            compression_ratio = (task_delta_tokens + tool_delta_tokens) / folded_tokens
+        fold_event = {
+            "fold_id": f"fold-{self._fold_count}",
+            "ts": utcnow(),
+            "trigger": {
+                "threshold_tokens": self.config.trigger_tokens(),
+                "threshold_ratio": self.config.fold_trigger_ratio,
+                "estimated_tokens_before": before["total"],
+                "usage_ratio_before": round(before["total"] / self.config.max_context_tokens, 6),
+            },
+            "before": before,
+            "after": after,
+            "folded": {
+                "group_count": len(eligible),
+                "group_ids": folded_ids,
+                "trajectory_tokens_removed": folded_tokens,
+                "task_delta_tokens": task_delta_tokens,
+                "tool_delta_tokens": tool_delta_tokens,
+                "compression_ratio": round(compression_ratio, 6),
+            },
+            "model": {
+                "used": False,
+                "calls": 0,
+                "retries": 0,
+                "fallback_used": True,
+            },
+            "result": {
+                "target_tokens": self.config.target_tokens(),
+                "target_met": after["total"] <= self.config.target_tokens(),
+                "new_epoch": self.trajectory.epoch_id,
+            },
+        }
+        self.event_log.append("fold_event", fold_event)
+        self.session.metrics["last_fold"] = {
+            "fold_id": fold_event["fold_id"],
+            "ts": fold_event["ts"],
+            "estimated_tokens_before": before["total"],
+            "estimated_tokens_after": after["total"],
+            "compression_ratio": fold_event["folded"]["compression_ratio"],
+            "target_met": fold_event["result"]["target_met"],
+        }
+        self.session.metrics["total_folded_trajectory_tokens"] = int(
+            self.session.metrics.get("total_folded_trajectory_tokens", 0)
+        ) + folded_tokens
+        self.session.metrics["last_compression_ratio"] = fold_event["folded"]["compression_ratio"]
+        if self._trace is not None:
+            self._trace.emit("fold_event", **fold_event)
+
+    def _estimate_layers(self) -> dict[str, int]:
+        state_block = self._state_block_text()
+        agent_block = self._agent_state_text()
+        stable_prefix = self.token_counter.estimate_text(self.system_prompt)
+        task_tool_state = self.token_counter.estimate_text(state_block)
+        recent_trajectory = sum(group.token_count for group in self.trajectory.groups)
+        agent_state = self.token_counter.estimate_text(agent_block)
+        raw_total = stable_prefix + task_tool_state + recent_trajectory + agent_state
+        coefficient = self.token_counter.calibration.coefficient
+        total = max(1, int(raw_total * coefficient)) if raw_total > 0 else 1
+        return {
+            "stable_prefix": stable_prefix,
+            "task_tool_state": task_tool_state,
+            "recent_trajectory": recent_trajectory,
+            "agent_state": agent_state,
+            "total": total,
+        }
+
     def _estimate_current(self) -> int:
-        messages = self._build_messages()
-        return self.token_counter.estimate_prompt(system_text=self.system_prompt, tools=None, messages=messages)
+        return self._estimate_layers()["total"]
 
     # ------------------------------------------------------------------ snapshot helpers
 
@@ -475,6 +548,9 @@ class StructuredContext:
 
     def set_checkpoint_callback(self, callback: Any) -> None:
         self._checkpoint_callback = callback
+
+    def set_trace(self, trace: Any) -> None:
+        self._trace = trace
 
     def on_tool_batch_start(self, calls: list[ToolCall], step: int) -> None:
         self._pending_batch_calls = list(calls)

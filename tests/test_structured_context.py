@@ -71,6 +71,54 @@ def test_workspace_diff(tmp_path: Path) -> None:
     assert report.unexpected_changes or report.hash_mismatches
 
 
+def test_fold_event_logs_token_statistics(tmp_path: Path) -> None:
+    from coding_agent.llm.base import ToolCall
+    from coding_agent.structured_context.session_store import StructuredSessionStore
+    from coding_agent.structured_context.structured_context import StructuredContextConfig
+    from coding_agent.tools.base import ToolResult
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    store = StructuredSessionStore(tmp_path / ".agent" / "sessions")
+    config = StructuredContextConfig(max_context_tokens=1000)
+    context = store.create_context(
+        session_id="fold-stats",
+        user_task="task",
+        provider="test",
+        model="test",
+        workspace_root=workspace,
+        system_prompt="sys",
+        prefix_hash="p",
+        tools_hash="t",
+        context_config=config,
+        context_window_limit=1000,
+    )
+    context.add_user("task")
+    context.add_assistant(None, [ToolCall(id="call_1", name="grep_search", arguments={"query": "needle"})])
+    context.add_tool_result(
+        ToolCall(id="call_1", name="grep_search", arguments={"query": "needle"}),
+        ToolResult.ok("result"),
+    )
+    context.finalize()
+    # A second, unprotected tool group that is large enough to force a fold.
+    context.add_assistant(None, [ToolCall(id="call_2", name="grep_search", arguments={"query": "x" * 4000})])
+    context.add_tool_result(
+        ToolCall(id="call_2", name="grep_search", arguments={"query": "x" * 4000}),
+        ToolResult.ok("ok"),
+    )
+    context.finalize()
+    _ = context.messages
+    fold_events = [event for event in context.event_log.read_since(0) if event["type"] == "fold_event"]
+    assert fold_events
+    payload = fold_events[0]["payload"]
+    assert payload["trigger"]["threshold_tokens"] == int(1000 * 0.70)
+    assert payload["before"]["total"] > payload["trigger"]["threshold_tokens"]
+    assert set(payload["after"]) >= {"stable_prefix", "task_tool_state", "recent_trajectory", "agent_state", "total"}
+    assert payload["folded"]["group_count"] == 1
+    assert "compression_ratio" in payload["folded"]
+    assert context.session.metrics["last_fold"]["fold_id"] == payload["fold_id"]
+
+
 def test_workspace_fingerprint_inside_git_subdirectory(tmp_path: Path) -> None:
     import subprocess
 

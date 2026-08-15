@@ -101,6 +101,7 @@ class StructuredHarness(Harness):
             context_window_limit=self.config.structured_context_window_limit,
         )
         context.set_checkpoint_callback(lambda step: self._periodic_checkpoint(session.session_id, step))
+        context.set_trace(self.trace)
         self._contexts[session.session_id] = context
         return context
 
@@ -152,6 +153,7 @@ class StructuredHarness(Harness):
             context_config=self._structured_config,
         )
         context.set_checkpoint_callback(lambda step: self._periodic_checkpoint(session_id, step))
+        context.set_trace(self.trace)
         session = context.session
         session.plan = [step.text for step in context.task_state.remaining]
         self._contexts[session_id] = context
