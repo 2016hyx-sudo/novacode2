@@ -71,6 +71,24 @@ def test_workspace_diff(tmp_path: Path) -> None:
     assert report.unexpected_changes or report.hash_mismatches
 
 
+def test_workspace_fingerprint_inside_git_subdirectory(tmp_path: Path) -> None:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=repo, check=True)
+    workspace = repo / "sub" / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "a.txt").write_text("one", encoding="utf-8")
+    fp = WorkspaceFingerprint(workspace)
+    actual = fp.actual()
+    assert [x["path"] for x in actual["untracked"]] == ["a.txt"]
+    expected = fp.expected_from_actual()
+    assert fp.diff(expected).severity == "NONE"
+
+
 def test_session_create_save_load(tmp_path: Path) -> None:
     root = tmp_path / ".agent" / "sessions"
     store = StructuredSessionStore(root)

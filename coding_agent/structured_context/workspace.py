@@ -39,8 +39,20 @@ def _hash_file(path: Path) -> str | None:
 
 
 def _status_pairs(root: Path) -> list[tuple[str, str]]:
-    """Return (status, path) pairs for tracked and untracked files."""
-    root = Path(root)
+    """Return (status, path) pairs relative to *root*.
+
+    ``git status`` reports paths relative to the repository root, not the
+    ``-C`` working directory. When the workspace is a subdirectory of a git
+    repository, paths must be converted back to workspace-relative paths and
+    entries outside the workspace must be discarded.
+    """
+    root = Path(root).resolve()
+    repo_root = root
+    toplevel = _run_git(root, "rev-parse", "--show-toplevel")
+    if toplevel and toplevel.strip():
+        candidate = Path(toplevel.strip()).resolve()
+        if candidate.exists():
+            repo_root = candidate
     output = _run_git(root, "status", "--porcelain=v1", "--untracked-files=all")
     if output is None:
         return []
@@ -50,17 +62,28 @@ def _status_pairs(root: Path) -> list[tuple[str, str]]:
             continue
         status = raw_line[:2].strip()
         path = raw_line[3:].strip()
+        absolute = Path(path)
+        if not absolute.is_absolute():
+            absolute = repo_root / path
+        try:
+            rel_path = absolute.resolve().relative_to(root)
+        except ValueError:
+            # Path is outside the configured workspace; not part of its state.
+            continue
+        rel = rel_path.as_posix()
         if path.endswith("/") and status == "??":
-            # Untracked directory: list its files directly.
-            dir_path = root / path.rstrip("/")
+            dir_path = absolute
             if dir_path.exists():
                 for item in sorted(dir_path.rglob("*")):
                     if item.is_file():
-                        rel = item.relative_to(root).as_posix()
-                        pairs.append(("??", rel))
+                        try:
+                            item_rel = item.resolve().relative_to(root).as_posix()
+                        except ValueError:
+                            continue
+                        pairs.append(("??", item_rel))
             continue
-        if path and status:
-            pairs.append((status, path))
+        if rel and status:
+            pairs.append((status, rel))
     return pairs
 
 
