@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.sessions/
+.traces/
+
+.env
+
+# Packaging artifacts
+*.egg-info/
