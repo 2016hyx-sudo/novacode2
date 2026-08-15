@@ -128,5 +128,9 @@ class AgentConfig:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     session_dir: Path = field(default_factory=lambda: Path(".sessions"))
     trace_dir: Path = field(default_factory=lambda: Path(".traces"))
-    # ContextManager trim threshold, in estimated tokens.
+    # Structured context / checkpoint-resume subsystem.
+    structured_context_enabled: bool = False
+    agent_dir: Path = field(default_factory=lambda: Path(".agent"))
+    # ContextManager trim threshold / structured logical window, in estimated tokens.
     max_context_tokens: int = 100_000
+    structured_context_window_limit: int = 256_000

@@ -80,6 +80,7 @@ All supported variables:
 |---|---|
 | `NOVACODE_PROVIDER` | `openai` (default) or `anthropic` |
 | `NOVACODE_MODEL` | model name |
+| `NOVACODE_MAX_TOKENS` | max output tokens per LLM response |
 | `OPENAI_API_KEY` | OpenAI key |
 | `ANTHROPIC_API_KEY` | Anthropic key |
 | `NOVACODE_API_KEY` | generic key for the selected provider |
@@ -123,6 +124,26 @@ Filesystem tools resolve every path through one workspace guard that rejects
 absolute paths, `..` traversal and symlink escapes. `run_shell` runs with the
 workspace as cwd, enforces a timeout and output cap, and has a small deny list.
 It is a best-effort guard, not a security sandbox.
+
+## Structured context / checkpoint-resume (v3, opt-in)
+
+A structured context mode is available behind a flag:
+
+```bash
+python main.py "add a health check endpoint" --structured-context --agent-dir .agent
+```
+
+It stores each session as a directory under `.agent/sessions/<session_id>/`
+with `task-state.json`, `tool-state.json`, `trajectory.json`, `events.jsonl`,
+raw tool-result artifacts and immutable checkpoints. Resume the same way as a
+legacy session:
+
+```bash
+python main.py "now also add /ready" --structured-context --session <session_id>
+```
+
+Design baseline: `coding_agent_context_management_v3.md`; detailed schema and
+implementation breakdown: `coding_agent_context_management_v3_schema.md`.
 
 ## Runtime loop
 

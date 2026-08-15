@@ -72,6 +72,18 @@ class ToolExecutor:
             )
             return self._finish(call, result, started, retries_used=0)
 
+        required = list((getattr(tool, "parameters", None) or {}).get("required") or [])
+        missing = [name for name in required if name not in call.arguments or call.arguments[name] is None]
+        if missing:
+            result = ToolResult.fail(
+                f"Tool {call.name!r} is missing required arguments: {', '.join(missing)}",
+                metadata={
+                    "kind": ToolErrorKind.INVALID_ARGUMENTS.value,
+                    "hint": "Check the tool schema and provide all required arguments.",
+                },
+            )
+            return self._finish(call, result, started, retries_used=0)
+
         retries_used = 0
         while True:
             try:

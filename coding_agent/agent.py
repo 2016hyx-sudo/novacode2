@@ -90,6 +90,9 @@ class AgentLoop:
                     stop_reason=response.stop_reason,
                     usage=response.usage,
                 )
+                record_usage = getattr(self.context, "record_usage", None)
+                if record_usage is not None:
+                    record_usage(response.usage)
 
                 if not response.tool_calls:
                     verdict = self._validate_final(response.text, history)
@@ -148,6 +151,9 @@ class AgentLoop:
 
                 # Execute every requested tool call and feed structured results back.
                 calls = self._ensure_call_ids(response.tool_calls, step)
+                on_batch_start = getattr(self.context, "on_tool_batch_start", None)
+                if on_batch_start is not None:
+                    on_batch_start(calls, step)
                 results = self.executor.execute_all(calls)
                 tool_calls_used += len(results)
                 for call, call_result in zip(calls, results):
@@ -175,6 +181,10 @@ class AgentLoop:
                     plan = self.planner.add_correction(summary)
                     self.context.set_plan(plan)
                     consecutive_failures = 0
+
+                on_batch_complete = getattr(self.context, "on_tool_batch_complete", None)
+                if on_batch_complete is not None:
+                    on_batch_complete(step)
 
                 self._emit("step_end", step=step)
 

@@ -49,8 +49,26 @@ def _tool_error_to_result(func: Callable[..., ToolResult]) -> Callable[..., Tool
     return wrapper
 
 
-def build_filesystem_tools(workspace: Path) -> list[Tool]:
+def build_filesystem_tools(workspace: Path, *, protected_rel: list[str] | None = None) -> list[Tool]:
     root = workspace
+    protected = [part.strip("/") for part in protected_rel or [] if part.strip("/")]
+
+    def is_protected(target: Path) -> bool:
+        if not protected:
+            return False
+        try:
+            rel = target.relative_to(root)
+        except ValueError:
+            return False
+        return bool(rel.parts and rel.parts[0] in protected)
+
+    def guard_protected(target: Path) -> None:
+        if is_protected(target):
+            raise ToolError(
+                f"Path is protected by the structured context runtime: {display(target)}",
+                kind=ToolErrorKind.WORKSPACE_VIOLATION,
+                hint="Use read_artifact for historical tool output; do not access runtime state files.",
+            )
 
     def display(path: Path) -> str:
         try:
@@ -61,6 +79,7 @@ def build_filesystem_tools(workspace: Path) -> list[Tool]:
     @_tool_error_to_result
     def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> ToolResult:
         target = resolve_workspace_path(root, path)
+        guard_protected(target)
         if not target.exists():
             raise ToolError(
                 f"File not found: {display(target)}",
@@ -98,6 +117,7 @@ def build_filesystem_tools(workspace: Path) -> list[Tool]:
     @_tool_error_to_result
     def write_file(path: str, content: str) -> ToolResult:
         target = resolve_workspace_path(root, path)
+        guard_protected(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         # Validation: the write must actually have happened.
@@ -127,6 +147,7 @@ def build_filesystem_tools(workspace: Path) -> list[Tool]:
                 hint="Provide a different new_string for an actual edit.",
             )
         target = resolve_workspace_path(root, path)
+        guard_protected(target)
         if not target.exists():
             raise ToolError(
                 f"File not found: {display(target)}",
@@ -169,6 +190,7 @@ def build_filesystem_tools(workspace: Path) -> list[Tool]:
     @_tool_error_to_result
     def list_files(path: str = ".", recursive: bool = False, max_entries: int = 200) -> ToolResult:
         target = resolve_workspace_path(root, path)
+        guard_protected(target)
         if not target.exists():
             raise ToolError(
                 f"Path not found: {display(target)}",
@@ -179,6 +201,8 @@ def build_filesystem_tools(workspace: Path) -> list[Tool]:
         entries: list[str] = []
         iterator = target.rglob("*") if recursive else target.glob("*")
         for item in iterator:
+            if is_protected(item):
+                continue
             rel = display(item)
             if item.is_dir():
                 rel += "/"
@@ -199,6 +223,7 @@ def build_filesystem_tools(workspace: Path) -> list[Tool]:
         max_results: int = 100,
     ) -> ToolResult:
         target = resolve_workspace_path(root, path)
+        guard_protected(target)
         if not target.exists():
             raise ToolError(
                 f"Path not found: {display(target)}",
@@ -207,6 +232,8 @@ def build_filesystem_tools(workspace: Path) -> list[Tool]:
         matches: list[str] = []
         iterator = target.rglob(pattern) if recursive else target.glob(pattern)
         for item in iterator:
+            if is_protected(item):
+                continue
             matches.append(display(item))
             if len(matches) >= max_results:
                 matches.append(f"... [truncated at {max_results} results]")
@@ -227,6 +254,7 @@ def build_filesystem_tools(workspace: Path) -> list[Tool]:
         if not query:
             raise ToolError("query must not be empty", kind=ToolErrorKind.INVALID_ARGUMENTS)
         target = resolve_workspace_path(root, path)
+        guard_protected(target)
         if not target.exists():
             raise ToolError(
                 f"Path not found: {display(target)}",
@@ -236,7 +264,7 @@ def build_filesystem_tools(workspace: Path) -> list[Tool]:
         results: list[str] = []
         truncated = False
         for item in sorted(target.rglob(file_pattern)):
-            if not item.is_file():
+            if not item.is_file() or is_protected(item):
                 continue
             try:
                 for lineno, line in enumerate(item.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):

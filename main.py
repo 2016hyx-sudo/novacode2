@@ -32,6 +32,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--list-sessions", action="store_true", help="List saved sessions and exit")
     parser.add_argument("--session-dir", default=None, help="Session storage directory")
     parser.add_argument("--trace-dir", default=None, help="Trace storage directory")
+    parser.add_argument("--structured-context", action="store_true", default=None, help="Use structured context / checkpoint-resume storage")
+    parser.add_argument("--agent-dir", default=None, help="Structured state root (sessions and traces live below it)")
     parser.add_argument("--env-file", default=None, help="Path to .env file (default: ./.env)")
     return parser.parse_args(argv)
 
@@ -77,6 +79,12 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
     )
     session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR", ".sessions"))
     trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR", ".traces"))
+    structured_context = (
+        args.structured_context
+        if args.structured_context is not None
+        else _truthy(os.getenv("NOVACODE_STRUCTURED_CONTEXT"))
+    )
+    agent_dir = Path(args.agent_dir or os.getenv("NOVACODE_AGENT_DIR", ".agent"))
 
     return AgentConfig(
         llm=llm,
@@ -85,6 +93,8 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
         constraints=constraints,
         session_dir=session_dir,
         trace_dir=trace_dir,
+        structured_context_enabled=structured_context,
+        agent_dir=agent_dir,
     )
 
 
@@ -100,13 +110,22 @@ def main(argv: list[str] | None = None) -> int:
     tui = TUI()
 
     if args.list_sessions:
-        from coding_agent.context.session import SessionStore
+        if config.structured_context_enabled:
+            from coding_agent.structured_context import StructuredSessionStore
 
-        sessions = SessionStore(config.session_dir).list_sessions()
-        if not sessions:
-            tui.console.print("No saved sessions.")
-        for path in sessions:
-            tui.console.print(f"{path.stem}  ·  {path}")
+            sessions = StructuredSessionStore(config.agent_dir / "sessions").list_sessions()
+            if not sessions:
+                tui.console.print("No saved sessions.")
+            for path in sessions:
+                tui.console.print(f"{path.name}  ·  {path}")
+        else:
+            from coding_agent.context.session import SessionStore
+
+            sessions = SessionStore(config.session_dir).list_sessions()
+            if not sessions:
+                tui.console.print("No saved sessions.")
+            for path in sessions:
+                tui.console.print(f"{path.stem}  ·  {path}")
         return 0
 
     try:

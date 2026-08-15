@@ -231,6 +231,11 @@ def create_harness(
     *,
     listeners: list[Callable[[TraceEvent], None]] | None = None,
 ) -> Harness:
+    if config.structured_context_enabled:
+        from .structured_context.structured_harness import StructuredHarness
+
+        return StructuredHarness(config, listeners=listeners)
+
     provider = create_provider(config.llm)
     trace = TraceWriter(config.trace_dir, listeners=listeners)
     session_store = SessionStore(config.session_dir)

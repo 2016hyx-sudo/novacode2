@@ -66,10 +66,12 @@ class OpenAIProvider:
 
         usage = {}
         if response.usage is not None:
+            details = getattr(response.usage, "prompt_tokens_details", None)
             usage = {
                 "prompt_tokens": getattr(response.usage, "prompt_tokens", None),
                 "completion_tokens": getattr(response.usage, "completion_tokens", None),
                 "total_tokens": getattr(response.usage, "total_tokens", None),
+                "cached_tokens": getattr(details, "cached_tokens", None),
             }
 
         return LLMResponse(

@@ -35,8 +35,15 @@ def build_shell_tool(
     *,
     shell_timeout: float = 60.0,
     max_output_chars: int = 20_000,
+    protected_names: list[str] | None = None,
 ) -> FunctionTool:
     root = _ensure_workspace(workspace)
+    protected_patterns: list[re.Pattern[str]] = []
+    for name in protected_names or []:
+        clean = name.strip("/")
+        if clean:
+            protected_patterns.append(re.compile(rf"(?:^|[\s;&|])\.?{re.escape(clean)}(?:/|\s|$)"))
+    protected_patterns.append(re.compile(r"(?:^|[\s;&|])\.?agent(?:/|\s|$)"))
 
     def _truncate(text: str) -> str:
         if len(text) <= max_output_chars:
@@ -51,7 +58,8 @@ def build_shell_tool(
                 metadata={"kind": ToolErrorKind.INVALID_ARGUMENTS.value},
             )
 
-        for pattern in _DENY_PATTERNS:
+        patterns = [*_DENY_PATTERNS, *protected_patterns]
+        for pattern in patterns:
             if pattern.search(command):
                 return ToolResult.fail(
                     f"Shell command rejected by safety policy: {command[:200]}",

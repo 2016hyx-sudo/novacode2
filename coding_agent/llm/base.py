@@ -51,6 +51,7 @@ class Message:
     tool_call_id: str | None = None
     name: str | None = None
     is_error: bool = False
+    cache_control: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"role": self.role}
@@ -64,6 +65,8 @@ class Message:
             data["name"] = self.name
         if self.is_error:
             data["is_error"] = True
+        if self.cache_control:
+            data["cache_control"] = True
         return data
 
     @classmethod
@@ -75,6 +78,7 @@ class Message:
             tool_call_id=data.get("tool_call_id"),
             name=data.get("name"),
             is_error=bool(data.get("is_error", False)),
+            cache_control=bool(data.get("cache_control", False)),
         )
 
 

@@ -1,6 +1,7 @@
 """Anthropic provider adapter built on the official anthropic SDK."""
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -28,6 +29,12 @@ class AnthropicProvider:
         system_parts: list[str] = []
         api_messages: list[dict[str, Any]] = []
         pending_tool_results: list[dict[str, Any]] = []
+        cache_marker = {"type": "ephemeral"}
+
+        def with_cache_control(content_blocks: list[dict[str, Any]], enabled: bool) -> list[dict[str, Any]]:
+            if enabled and content_blocks:
+                content_blocks[-1]["cache_control"] = cache_marker
+            return content_blocks
 
         def flush_tool_results() -> None:
             if pending_tool_results:
@@ -68,22 +75,31 @@ class AnthropicProvider:
                             "input": call.arguments or {},
                         }
                     )
+                content_blocks = with_cache_control(content_blocks, message.cache_control)
                 api_messages.append({"role": "assistant", "content": content_blocks or [{"type": "text", "text": ""}]})
             else:
-                api_messages.append({"role": "user", "content": message.content or ""})
+                content: Any = message.content or ""
+                if message.cache_control:
+                    content = with_cache_control([{"type": "text", "text": content}], True)
+                api_messages.append({"role": "user", "content": content})
 
         flush_tool_results()
 
-        system = "\n\n".join(part.strip() for part in system_parts if part.strip())
+        system_blocks: list[dict[str, Any]] = []
+        for part in system_parts:
+            if part.strip():
+                system_blocks.append({"type": "text", "text": part.strip()})
+        if system_blocks:
+            system_blocks[-1]["cache_control"] = cache_marker
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": self.config.max_tokens,
             "messages": api_messages,
         }
-        if system:
-            kwargs["system"] = system
+        if system_blocks:
+            kwargs["system"] = system_blocks
         if tools:
-            kwargs["tools"] = [
+            tool_params: list[dict[str, Any]] = [
                 {
                     "name": tool.name,
                     "description": tool.description,
@@ -91,6 +107,9 @@ class AnthropicProvider:
                 }
                 for tool in tools
             ]
+            if tool_params:
+                tool_params[-1]["cache_control"] = cache_marker
+            kwargs["tools"] = tool_params
 
         try:
             response = self.client.messages.create(**kwargs)
@@ -105,6 +124,11 @@ class AnthropicProvider:
                 text_parts.append(getattr(block, "text", "") or "")
             elif block_type == "tool_use":
                 raw_input = getattr(block, "input", {}) or {}
+                if isinstance(raw_input, str):
+                    try:
+                        raw_input = json.loads(raw_input)
+                    except json.JSONDecodeError:
+                        raw_input = {}
                 arguments = raw_input if isinstance(raw_input, dict) else {}
                 tool_calls.append(
                     ToolCall(
@@ -119,6 +143,8 @@ class AnthropicProvider:
             usage = {
                 "input_tokens": getattr(response.usage, "input_tokens", None),
                 "output_tokens": getattr(response.usage, "output_tokens", None),
+                "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", None),
+                "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", None),
             }
 
         return LLMResponse(
