@@ -128,6 +128,8 @@ class AgentConfig:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     session_dir: Path = field(default_factory=lambda: Path(".sessions"))
     trace_dir: Path = field(default_factory=lambda: Path(".traces"))
+    session_dir_explicit: bool = False
+    trace_dir_explicit: bool = False
     # Structured context / checkpoint-resume subsystem.
     structured_context_enabled: bool = False
     agent_dir: Path = field(default_factory=lambda: Path(".agent"))

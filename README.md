@@ -142,6 +142,15 @@ legacy session:
 python main.py "now also add /ready" --structured-context --session <session_id>
 ```
 
+Structured sessions also support crash replay of un-checkpointed events,
+LLM-assisted trajectory folding with deterministic fallback, state capacity
+control, workspace-drift RESUME / REPLAN / BLOCKED recovery, session locks and
+legacy-session migration:
+
+```bash
+python main.py --structured-context --migrate-legacy-session <session_id>
+```
+
 Design baseline: `coding_agent_context_management_v3.md`; detailed schema and
 implementation breakdown: `coding_agent_context_management_v3_schema.md`.
 

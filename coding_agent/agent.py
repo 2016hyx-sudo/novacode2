@@ -24,6 +24,8 @@ class AgentRunResult:
     status: Literal["completed", "stopped", "failed"] = "completed"
     steps_used: int = 0
     tool_calls_used: int = 0
+    # Optional structured report populated by structured-context subagents.
+    structured_report: dict | None = None
 
 
 class AgentLoop:
@@ -210,6 +212,10 @@ class AgentLoop:
             )
 
     def _chat_with_retry(self) -> LLMResponse:
+        # Structured contexts may fold long trajectories before the first call.
+        prepare_for_chat = getattr(self.context, "prepare_for_chat", None)
+        if prepare_for_chat is not None:
+            prepare_for_chat()
         attempts = self.max_llm_retries + 1
         for attempt in range(attempts):
             self._emit(

@@ -33,6 +33,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--session-dir", default=None, help="Session storage directory")
     parser.add_argument("--trace-dir", default=None, help="Trace storage directory")
     parser.add_argument("--structured-context", action="store_true", default=None, help="Use structured context / checkpoint-resume storage")
+    parser.add_argument("--migrate-legacy-session", metavar="SESSION_ID", default=None, help="Migrate one legacy .sessions/<id>.json session to structured storage")
+    parser.add_argument("--legacy-session-dir", default=None, help="Directory containing the legacy .sessions/<id>.json file")
     parser.add_argument("--agent-dir", default=None, help="Structured state root (sessions and traces live below it)")
     parser.add_argument("--env-file", default=None, help="Path to .env file (default: ./.env)")
     return parser.parse_args(argv)
@@ -77,14 +79,21 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
     planner_enabled = (
         args.planner if args.planner is not None else _truthy(os.getenv("NOVACODE_PLANNER"))
     )
-    session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR", ".sessions"))
-    trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR", ".traces"))
     structured_context = (
         args.structured_context
         if args.structured_context is not None
         else _truthy(os.getenv("NOVACODE_STRUCTURED_CONTEXT"))
     )
     agent_dir = Path(args.agent_dir or os.getenv("NOVACODE_AGENT_DIR", ".agent"))
+    session_explicit = bool(args.session_dir or os.getenv("NOVACODE_SESSION_DIR"))
+    trace_explicit = bool(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR"))
+    if structured_context:
+        # --agent-dir is the umbrella switch; explicit session/trace options win.
+        session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR") or (agent_dir / "sessions"))
+        trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR") or (agent_dir / "traces"))
+    else:
+        session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR", ".sessions"))
+        trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR", ".traces"))
 
     return AgentConfig(
         llm=llm,
@@ -93,6 +102,8 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
         constraints=constraints,
         session_dir=session_dir,
         trace_dir=trace_dir,
+        session_dir_explicit=session_explicit,
+        trace_dir_explicit=trace_explicit,
         structured_context_enabled=structured_context,
         agent_dir=agent_dir,
     )
@@ -113,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         if config.structured_context_enabled:
             from coding_agent.structured_context import StructuredSessionStore
 
-            sessions = StructuredSessionStore(config.agent_dir / "sessions").list_sessions()
+            sessions = StructuredSessionStore(config.session_dir).list_sessions()
             if not sessions:
                 tui.console.print("No saved sessions.")
             for path in sessions:
@@ -128,11 +139,28 @@ def main(argv: list[str] | None = None) -> int:
                 tui.console.print(f"{path.stem}  ·  {path}")
         return 0
 
+    if args.migrate_legacy_session and not config.structured_context_enabled:
+        tui.console.print("[red]Legacy session migration requires --structured-context[/red]")
+        return 2
+
     try:
         harness = create_harness(config, listeners=[tui.handle_event])
     except Exception as exc:
         tui.console.print(f"[red]Failed to initialize harness: {exc}[/red]")
         return 1
+
+    if args.migrate_legacy_session:
+        if not hasattr(harness, "migrate_legacy_session"):
+            tui.console.print("[red]Legacy session migration is unavailable in this harness[/red]")
+            return 2
+        legacy_dir = args.legacy_session_dir or os.getenv("NOVACODE_LEGACY_SESSION_DIR", ".sessions")
+        try:
+            session = harness.migrate_legacy_session(args.migrate_legacy_session, legacy_dir=legacy_dir)
+        except (FileNotFoundError, FileExistsError, ValueError) as exc:
+            tui.console.print(f"[red]Migration failed: {exc}[/red]")
+            return 1
+        tui.console.print(f"Migrated legacy session to structured session {session.id}")
+        return 0
 
     if args.interactive:
         tui.run_interactive(harness, session_id=args.session)

@@ -36,11 +36,20 @@ class Calibration:
             "coefficient": self.coefficient,
             "samples": len(self.window),
             "max_window": self.max_window,
+            "window": [[float(estimate), float(ratio)] for estimate, ratio in self.window],
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Calibration:
-        return cls(coefficient=float(data.get("coefficient", 1.0)))
+        data = data or {}
+        calibration = cls(
+            coefficient=float(data.get("coefficient", 1.0)),
+            max_window=int(data.get("max_window", 8)),
+        )
+        for pair in data.get("window") or []:
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                calibration.window.append((float(pair[0]), float(pair[1])))
+        return calibration
 
 
 class TokenCounter:
@@ -89,6 +98,14 @@ class TokenCounter:
     ) -> int:
         raw = self.estimate_text(system_text) + self.estimate_tools(tools) + self.estimate_messages(messages)
         return max(1, int(raw * self.calibration.coefficient))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"calibration": self.calibration.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> TokenCounter:
+        data = data or {}
+        return cls(calibration=Calibration.from_dict(data.get("calibration") or data))
 
     def record_usage(self, estimate: int, usage: TokenUsage | dict[str, Any]) -> None:
         if isinstance(usage, dict):
