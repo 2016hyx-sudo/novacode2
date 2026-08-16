@@ -21,6 +21,7 @@ from .models import (
 )
 from .state_merge import deterministic_fold_delta, merge_task_delta, merge_tool_delta
 from .token_counter import TokenCounter
+from .trajectory_archive import TrajectoryArchive
 from .workspace import WorkspaceFingerprint
 
 TOOL_OUTPUT_CAPS: dict[str, int] = {
@@ -70,6 +71,7 @@ class StructuredContext:
         artifact_store: ArtifactStore,
         workspace_fingerprint: WorkspaceFingerprint,
         token_counter: TokenCounter,
+        trajectory_archive: TrajectoryArchive | None = None,
         config: StructuredContextConfig | None = None,
         prefix_hash: str = "",
         tools_hash: str = "",
@@ -84,6 +86,7 @@ class StructuredContext:
         self.artifact_store = artifact_store
         self.workspace_fingerprint = workspace_fingerprint
         self.token_counter = token_counter
+        self.trajectory_archive = trajectory_archive
         self.config = config or StructuredContextConfig()
         self.prefix_hash = prefix_hash
         self.tools_hash = tools_hash
@@ -91,6 +94,8 @@ class StructuredContext:
         self._checkpoint_callback = None
         self._pending_batch_calls: list[ToolCall] = []
         self._current_group: InteractionGroup | None = None
+        self._pending_raw_refs: list[dict[str, Any]] = []
+        self._archived_group_ids: set[str] = set()
         self._current_turn_group_id: str | None = None
         self._fold_count = int(session.metrics.get("fold_count", 0))
         self._last_built_messages: list[Message] = []
@@ -154,6 +159,13 @@ class StructuredContext:
             raw_text,
             tool_call_id=call.id,
             arguments=call.arguments,
+        )
+        self._pending_raw_refs.append(
+            {
+                "tool_call_id": call.id,
+                "name": call.name,
+                "artifact_id": artifact_entry["artifact_id"],
+            }
         )
         observation = self._compress_observation(call, result, raw_text, artifact_entry["artifact_id"])
         self.add(Message(role="tool", content=observation, tool_call_id=call.id, name=call.name, is_error=not result.success))
@@ -395,6 +407,7 @@ class StructuredContext:
     def _ensure_group(self) -> None:
         if self._current_group is not None:
             return
+        self._pending_raw_refs = []
         group_id = f"g-{self.event_log.last_seq + 1:06d}"
         self._current_group = InteractionGroup(
             group_id=group_id,
@@ -408,7 +421,18 @@ class StructuredContext:
             self._current_group.status = "complete"
             if self._current_group.source_events.get("last_seq") is None:
                 self._current_group.source_events["last_seq"] = self.event_log.last_seq
+            if (
+                self.trajectory_archive is not None
+                and self._current_group.group_id not in self._archived_group_ids
+                and self._current_group.messages
+            ):
+                self.trajectory_archive.append_group(
+                    self._current_group,
+                    raw_tool_result_refs=self._pending_raw_refs,
+                )
+                self._archived_group_ids.add(self._current_group.group_id)
             self._current_group = None
+            self._pending_raw_refs = []
 
     def _maybe_fold(self) -> None:
         if self.trajectory.epoch_id < 0:

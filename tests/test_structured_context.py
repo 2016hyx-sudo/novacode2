@@ -118,6 +118,12 @@ def test_fold_event_logs_token_statistics(tmp_path: Path) -> None:
     assert "compression_ratio" in payload["folded"]
     assert context.session.metrics["last_fold"]["fold_id"] == payload["fold_id"]
 
+    archive = context.trajectory_archive.read_groups()
+    archived_ids = {group["group_id"] for group in archive}
+    assert payload["folded"]["group_ids"][0] in archived_ids
+    prompt_group_ids = {group.group_id for group in context.trajectory.groups}
+    assert payload["folded"]["group_ids"][0] not in prompt_group_ids
+
 
 def test_workspace_fingerprint_inside_git_subdirectory(tmp_path: Path) -> None:
     import subprocess

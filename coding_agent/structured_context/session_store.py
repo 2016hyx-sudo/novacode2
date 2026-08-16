@@ -18,6 +18,7 @@ from .models import (
 )
 from .structured_context import StructuredContext, StructuredContextConfig
 from .token_counter import TokenCounter
+from .trajectory_archive import TrajectoryArchive
 from .workspace import WorkspaceFingerprint
 
 
@@ -87,6 +88,7 @@ class StructuredSessionStore:
             artifact_store=artifact_store,
             workspace_fingerprint=fingerprint,
             token_counter=TokenCounter(),
+            trajectory_archive=TrajectoryArchive(directory / "trajectory-archive.jsonl", fsync=self.fsync),
             config=context_config or StructuredContextConfig(max_context_tokens=context_window_limit),
             prefix_hash=prefix_hash,
             tools_hash=tools_hash,
@@ -134,6 +136,7 @@ class StructuredSessionStore:
             artifact_store=artifact_store,
             workspace_fingerprint=fingerprint,
             token_counter=TokenCounter(),
+            trajectory_archive=TrajectoryArchive(directory / "trajectory-archive.jsonl", fsync=self.fsync),
             config=context_config,
             prefix_hash=str(session.config_fingerprint.get("prefix_hash", "")),
             tools_hash=str(session.config_fingerprint.get("tools_hash", "")),

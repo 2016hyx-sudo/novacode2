@@ -6,6 +6,7 @@ from .recovery import RecoveryEngine, RecoveryPolicy
 from .session_store import StructuredSessionStore
 from .structured_context import StructuredContext, StructuredContextConfig
 from .token_counter import TokenCounter
+from .trajectory_archive import TrajectoryArchive
 from .workspace import WorkspaceFingerprint
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "StructuredContextConfig",
     "StructuredSessionStore",
     "TokenCounter",
+    "TrajectoryArchive",
     "WorkspaceFingerprint",
 ]

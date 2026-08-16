@@ -28,6 +28,7 @@
     task-state.json
     tool-state.json
     trajectory.json
+    trajectory-archive.jsonl
     events.jsonl
     artifact-index.jsonl
     artifacts/
@@ -50,6 +51,7 @@
 | task-state.json | Task State 物化快照 | 原子替换 |
 | tool-state.json | Tool State 物化快照 | 原子替换 |
 | trajectory.json | Recent Trajectory 物化快照 | 原子替换 |
+| trajectory-archive.jsonl | 完整未折叠 Interaction Group 历史 | append-only |
 | events.jsonl | 权威事件日志 / WAL | append-only |
 | artifact-index.jsonl | Artifact 索引 | append-only |
 | artifacts/ | Raw Tool Result 与必要原文 | 不可变写入 |
@@ -61,6 +63,7 @@
 原则：
 
 - `events.jsonl` 是恢复的权威来源；
+- `trajectory-archive.jsonl` 是完整未折叠对话历史，append-only；
 - `session.json`、`task-state.json`、`tool-state.json`、`trajectory.json` 是从事件日志物化出的快照；
 - Artifact 与 Checkpoint 不可变；
 - 除事件日志和 Artifact 外，其他文件更新都必须经过 Checkpoint 提交协议。
