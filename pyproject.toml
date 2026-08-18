@@ -20,7 +20,7 @@ novacode = "main:main"
 py-modules = ["main", "config", "demo"]
 
 [tool.setuptools.packages.find]
-include = ["coding_agent*", "evals*"]
+include = ["coding_agent*", "evals*", "ama_bench*"]
 
 [tool.ruff.lint]
 ignore = ["BLE001"]
