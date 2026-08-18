@@ -176,7 +176,7 @@ class BuilderConfig:
     fold_target_ratio: float = 0.45
     protected_recent_groups: int = 2
     fold_max_input_chars: int = 60_000
-    fold_max_attempts: int = 2
+    fold_max_attempts: int = 3
     compact_task_budget_tokens: int = 8_000
     compact_tool_budget_tokens: int = 8_000
     work_dir: Path | None = None

@@ -72,6 +72,10 @@ class FoldEngineConfig:
     max_tool_chars: int = 1_000
     max_output_chars: int = 24_000
     max_groups_per_request: int = 30
+    # Progressive wait between fold retries (seconds): gateway/upstream
+    # hiccups are often bursty, so an immediate retry lands in the same bad
+    # window. Attempt N waits retry_delay_s * N.
+    retry_delay_s: float = 8.0
 
 
 class FoldEngine:
@@ -171,6 +175,7 @@ class FoldEngine:
                 last_error = f"{type(exc).__name__}: {exc}"
                 if attempt >= self.config.max_attempts:
                     break
+                time.sleep(self.config.retry_delay_s * attempt)
 
         return self._fallback(
             task_state,

@@ -101,7 +101,7 @@ class NovaCodeMemoryMethod(BaseMethod):
         embedding_engine: Any = None,
         client: Any = None,
         fold_provider: LLMProvider | None = None,
-        fold_max_attempts: int = 2,
+        fold_max_attempts: int = 3,
         keep_work_dir: bool = False,
         max_context_tokens: int = 96_000,
     ) -> None:

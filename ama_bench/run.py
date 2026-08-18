@@ -547,11 +547,15 @@ def main(argv: list[str] | None = None) -> int:
 
     audit_dir = Path(args.audit_dir) if args.audit_dir else (Path(args.output).parent / "audit")
     keep_work_dir = bool(args.keep_work_dir or args.audit_full)
+    provider = build_provider(args)
     method = NovaCodeMemoryMethod(
         config_path=args.method_config,
         keep_work_dir=keep_work_dir,
+        # Standalone runner drives the LLM-assisted fold with the same
+        # provider as answering; without this the fold falls back to the
+        # deterministic extractor and key_sequences is never produced.
+        fold_provider=provider,
     )
-    provider = build_provider(args)
     mode = "per-question" if not args.batch else "batch"
     print(f"[ama] mode={mode}")
     print(f"[ama] audit: {audit_dir}" + (" (full)" if args.audit_full else " (compact)"))
