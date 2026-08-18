@@ -373,6 +373,7 @@ class StructuredHarness(Harness):
             trace=self.trace,
             provider_name=self.config.llm.provider,
             model=self.config.llm.model,
+            reasoning_effort=self.config.llm.secondary_reasoning_effort,
         )
 
     def _replan_after_drift(

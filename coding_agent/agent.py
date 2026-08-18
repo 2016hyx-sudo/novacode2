@@ -90,11 +90,14 @@ class AgentLoop:
                     )
 
                 steps_used += 1
-                self.context.add_assistant(response.text, response.tool_calls)
+                self.context.add_assistant(
+                    response.text, response.tool_calls, raw_content=response.raw_content
+                )
                 self._emit(
                     "llm_response",
                     step=step,
                     text=response.text,
+                    thinking=response.thinking,
                     tool_calls=[call.name for call in response.tool_calls],
                     stop_reason=response.stop_reason,
                     usage=response.usage,
@@ -282,9 +285,19 @@ class AgentLoop:
             )
             attempt_messages = tuple(copy.deepcopy(list(messages)))
             attempt_tools = tuple(copy.deepcopy(list(tool_schemas)))
+            # Subagents and other secondary roles run at a cheaper effort; the
+            # main agent uses the configured reasoning effort (None = provider
+            # default). getattr keeps this duck-typed for any provider.
+            llm_config = getattr(self.llm, "config", None)
+            if self._agent_role() == "subagent":
+                effort = getattr(llm_config, "secondary_reasoning_effort", None) or "none"
+            else:
+                effort = getattr(llm_config, "reasoning_effort", None)
             started = time.monotonic()
             try:
-                response = self.llm.chat(attempt_messages, attempt_tools)
+                response = self.llm.chat(
+                    attempt_messages, attempt_tools, reasoning_effort=effort
+                )
             except LLMError as exc:
                 self._emit(
                     "llm_request_finished",

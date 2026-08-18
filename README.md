@@ -80,7 +80,9 @@ All supported variables:
 |---|---|
 | `NOVACODE_PROVIDER` | `openai` (default) or `anthropic` |
 | `NOVACODE_MODEL` | model name |
-| `NOVACODE_MAX_TOKENS` | max output tokens per LLM response |
+| `NOVACODE_MAX_TOKENS` | max output tokens per LLM response; thinking/reasoning tokens share this budget with the final text |
+| `NOVACODE_REASONING_EFFORT` | main-agent thinking effort: `none` \| `low` \| `high` \| `max` (empty = provider default, thinking on) |
+| `NOVACODE_SECONDARY_REASONING_EFFORT` | effort for subagents and context folding (default `none`) |
 | `OPENAI_API_KEY` | OpenAI key |
 | `ANTHROPIC_API_KEY` | Anthropic key |
 | `NOVACODE_API_KEY` | generic key for the selected provider |

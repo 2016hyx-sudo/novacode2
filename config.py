@@ -59,6 +59,21 @@ def load_env_file(path: str | Path | None = None, *, override: bool = False) -> 
 
 ProviderName = Literal["openai", "anthropic"]
 
+# Thinking/reasoning effort levels. "none" disables thinking entirely.
+REASONING_EFFORTS = frozenset({"none", "low", "high", "max"})
+
+
+def _parse_reasoning_effort(value: str | None, default: str | None) -> str | None:
+    """Parse a NOVACODE_*_REASONING_EFFORT env value, validating the level."""
+    if value is None or not value.strip():
+        return default
+    effort = value.strip().lower()
+    if effort not in REASONING_EFFORTS:
+        raise ValueError(
+            f"invalid reasoning effort {value!r}; expected one of: {', '.join(sorted(REASONING_EFFORTS))}"
+        )
+    return effort
+
 DEFAULT_SYSTEM_PROMPT = """You are NovaCode, a lightweight coding agent.
 You work inside a single workspace directory. Use the provided tools to inspect,
 modify and verify code. Prefer small, verifiable changes.
@@ -80,6 +95,13 @@ class LLMConfig:
     base_url: str | None = None
     max_tokens: int = 4096
     timeout: float = 120.0
+    # Thinking/reasoning effort for main-agent calls: "none" | "low" | "high" |
+    # "max"; None keeps the provider default (thinking on). Effort also caps the
+    # thinking+text output shared budget (see NOVACODE_MAX_TOKENS).
+    reasoning_effort: str | None = None
+    # Effort for secondary calls (subagents and context folding): cheap
+    # summarization/mechanical work that does not need reasoning by default.
+    secondary_reasoning_effort: str | None = "none"
 
     @classmethod
     def from_env(cls) -> LLMConfig:
@@ -95,6 +117,12 @@ class LLMConfig:
             base_url=os.getenv("NOVACODE_BASE_URL") or None,
             max_tokens=int(os.getenv("NOVACODE_MAX_TOKENS", "4096")),
             timeout=float(os.getenv("NOVACODE_LLM_TIMEOUT", "120")),
+            reasoning_effort=_parse_reasoning_effort(
+                os.getenv("NOVACODE_REASONING_EFFORT"), None
+            ),
+            secondary_reasoning_effort=_parse_reasoning_effort(
+                os.getenv("NOVACODE_SECONDARY_REASONING_EFFORT"), "none"
+            ),
         )
 
 

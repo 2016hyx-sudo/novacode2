@@ -190,7 +190,7 @@ class EvaluationRunResult:
 class DisabledNetworkProvider:
     """Default provider: it is intentionally incapable of real API traffic."""
 
-    def chat(self, messages: Sequence[Any], tools: Sequence[Any] | None = None) -> Any:
+    def chat(self, messages: Sequence[Any], tools: Sequence[Any] | None = None, *, reasoning_effort: str | None = None) -> Any:
         from coding_agent.llm.base import LLMError
 
         raise LLMError(
@@ -210,7 +210,7 @@ class ScriptedProvider:
         self.requests: list[dict[str, Any]] = []
         self._index = 0
 
-    def chat(self, messages: Sequence[Any], tools: Sequence[Any] | None = None) -> Any:
+    def chat(self, messages: Sequence[Any], tools: Sequence[Any] | None = None, *, reasoning_effort: str | None = None) -> Any:
         from coding_agent.llm.base import LLMResponse
 
         self.requests.append(

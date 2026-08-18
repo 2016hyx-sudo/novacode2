@@ -41,8 +41,21 @@ class ContextManager:
     def add_system(self, content: str) -> None:
         self.add(Message(role="system", content=content))
 
-    def add_assistant(self, content: str | None, tool_calls: list[ToolCall] | None = None) -> None:
-        self.add(Message(role="assistant", content=content, tool_calls=tool_calls or []))
+    def add_assistant(
+        self,
+        content: str | None,
+        tool_calls: list[ToolCall] | None = None,
+        *,
+        raw_content: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.add(
+            Message(
+                role="assistant",
+                content=content,
+                tool_calls=tool_calls or [],
+                raw_content=raw_content,
+            )
+        )
 
     def add_tool_result(self, call: ToolCall, result: ToolResult) -> None:
         self.add(
@@ -83,6 +96,13 @@ class ContextManager:
                     total += len(json.dumps(call.arguments, ensure_ascii=False)) // 4 + 1
                 except TypeError:
                     total += 4
+            # Replayed raw blocks (thinking, tool_use) are also input tokens.
+            if message.raw_content:
+                for block in message.raw_content:
+                    try:
+                        total += len(json.dumps(block, ensure_ascii=False)) // 4 + 1
+                    except TypeError:
+                        total += 4
         return total
 
     def _trim(self) -> None:

@@ -69,7 +69,7 @@ def test_agent_retry_uses_one_snapshot_and_unique_attempt_ids(
             self.calls = 0
             self.message_objects: list[object] = []
 
-        def chat(self, messages, tools=None):
+        def chat(self, messages, tools=None, *, reasoning_effort=None):
             self.calls += 1
             self.message_objects.append(messages)
             if self.calls == 1:
@@ -153,7 +153,7 @@ def test_fold_requests_report_usage_and_parent_request(tmp_path: Path) -> None:
     trace = TraceWriter(tmp_path / "traces", session_id="fold-session", listeners=[events.append])
 
     class FoldProvider:
-        def chat(self, messages, tools=None):
+        def chat(self, messages, tools=None, *, reasoning_effort=None):
             return LLMResponse(
                 text='{"task_delta": {}, "tool_delta": {}}',
                 usage={
@@ -205,7 +205,7 @@ def test_fold_fallback_traces_every_failed_attempt(tmp_path: Path) -> None:
     trace = TraceWriter(tmp_path / "traces", session_id="fold-failure", listeners=[events.append])
 
     class FailingProvider:
-        def chat(self, messages, tools=None):
+        def chat(self, messages, tools=None, *, reasoning_effort=None):
             raise RuntimeError("fold unavailable")
 
     group = InteractionGroup(
@@ -259,14 +259,14 @@ def test_structured_fold_and_main_retry_share_request_lineage(
     trace = TraceWriter(tmp_path / "traces", session_id="lineage-session", listeners=[events.append])
 
     class FoldProvider:
-        def chat(self, messages, tools=None):
+        def chat(self, messages, tools=None, *, reasoning_effort=None):
             return LLMResponse(text='{"task_delta": {}, "tool_delta": {}}')
 
     class MainProvider:
         def __init__(self) -> None:
             self.calls = 0
 
-        def chat(self, messages, tools=None):
+        def chat(self, messages, tools=None, *, reasoning_effort=None):
             self.calls += 1
             if self.calls == 1:
                 raise LLMError("retry main", retryable=True)

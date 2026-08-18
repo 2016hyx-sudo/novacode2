@@ -25,6 +25,8 @@ class AnthropicProvider:
         self,
         messages: list[Message] | tuple[Message, ...],
         tools: list[ToolSchema] | tuple[ToolSchema, ...] | None = None,
+        *,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         system_parts: list[str] = []
         api_messages: list[dict[str, Any]] = []
@@ -63,18 +65,23 @@ class AnthropicProvider:
             flush_tool_results()
 
             if message.role == "assistant":
-                content_blocks: list[dict[str, Any]] = []
-                if message.content:
-                    content_blocks.append({"type": "text", "text": message.content})
-                for call in message.tool_calls:
-                    content_blocks.append(
-                        {
-                            "type": "tool_use",
-                            "id": call.id,
-                            "name": call.name,
-                            "input": call.arguments or {},
-                        }
-                    )
+                if message.raw_content:
+                    # Replay the provider's blocks verbatim (thinking with its
+                    # signature, text, tool_use) so reasoning survives the loop.
+                    content_blocks = [dict(block) for block in message.raw_content]
+                else:
+                    content_blocks = []
+                    if message.content:
+                        content_blocks.append({"type": "text", "text": message.content})
+                    for call in message.tool_calls:
+                        content_blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": call.id,
+                                "name": call.name,
+                                "input": call.arguments or {},
+                            }
+                        )
                 content_blocks = with_cache_control(content_blocks, message.cache_control)
                 api_messages.append({"role": "assistant", "content": content_blocks or [{"type": "text", "text": ""}]})
             else:
@@ -91,11 +98,20 @@ class AnthropicProvider:
                 system_blocks.append({"type": "text", "text": part.strip()})
         if system_blocks:
             system_blocks[-1]["cache_control"] = cache_marker
+        effort = reasoning_effort if reasoning_effort is not None else self.config.reasoning_effort
         kwargs: dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": self.config.max_tokens,
             "messages": api_messages,
         }
+        if effort:
+            if effort == "none":
+                # Disable thinking entirely; the budget then all goes to text.
+                kwargs["thinking"] = {"type": "disabled"}
+            else:
+                # DeepSeek Anthropic-format knob: effort also controls thinking
+                # intensity (low/medium map to high on DeepSeek models).
+                kwargs["output_config"] = {"effort": effort}
         if system_blocks:
             kwargs["system"] = system_blocks
         if tools:
@@ -117,11 +133,25 @@ class AnthropicProvider:
             raise self._translate_error(exc) from exc
 
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        raw_blocks: list[dict[str, Any]] = []
         for block in response.content:
             block_type = getattr(block, "type", "")
-            if block_type == "text":
+            if block_type == "thinking":
+                # Keep the reasoning text for display and the block (with its
+                # signature) verbatim so it can be replayed unchanged.
+                thinking_parts.append(getattr(block, "thinking", "") or "")
+                raw_blocks.append(
+                    {
+                        "type": "thinking",
+                        "thinking": getattr(block, "thinking", "") or "",
+                        "signature": getattr(block, "signature", "") or "",
+                    }
+                )
+            elif block_type == "text":
                 text_parts.append(getattr(block, "text", "") or "")
+                raw_blocks.append({"type": "text", "text": getattr(block, "text", "") or ""})
             elif block_type == "tool_use":
                 raw_input = getattr(block, "input", {}) or {}
                 if isinstance(raw_input, str):
@@ -136,6 +166,14 @@ class AnthropicProvider:
                         name=getattr(block, "name", "") or "",
                         arguments=dict(arguments),
                     )
+                )
+                raw_blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": getattr(block, "id", "") or "",
+                        "name": getattr(block, "name", "") or "",
+                        "input": dict(arguments),
+                    }
                 )
 
         usage = {}
@@ -152,6 +190,8 @@ class AnthropicProvider:
             tool_calls=tool_calls,
             stop_reason=getattr(response, "stop_reason", None),
             usage=usage,
+            thinking="\n".join(thinking_parts) or None,
+            raw_content=raw_blocks or None,
         )
 
     @staticmethod

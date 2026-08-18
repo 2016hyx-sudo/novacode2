@@ -142,7 +142,12 @@ class EventReplayer:
     def _apply_assistant_message(self, context: Any, payload: dict[str, Any]) -> str:
         group = self._group(context, str(payload.get("group_id", "")))
         calls = [ToolCall.from_dict(item) for item in payload.get("tool_calls") or []]
-        message = Message(role="assistant", content=payload.get("content"), tool_calls=calls)
+        message = Message(
+            role="assistant",
+            content=payload.get("content"),
+            tool_calls=calls,
+            raw_content=payload.get("raw_content"),
+        )
         group.messages.append(message)
         group.token_count += context.token_counter.estimate_message(message)
         return group.group_id

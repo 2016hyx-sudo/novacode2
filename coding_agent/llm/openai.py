@@ -25,6 +25,8 @@ class OpenAIProvider:
         self,
         messages: list[Message] | tuple[Message, ...],
         tools: list[ToolSchema] | tuple[ToolSchema, ...] | None = None,
+        *,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         payload_messages = [self._to_openai_message(msg) for msg in messages]
         kwargs: dict[str, Any] = {
@@ -32,6 +34,13 @@ class OpenAIProvider:
             "messages": payload_messages,
             "max_tokens": self.config.max_tokens,
         }
+        effort = reasoning_effort if reasoning_effort is not None else self.config.reasoning_effort
+        if effort:
+            if effort == "none":
+                # DeepSeek: thinking on/off lives in extra_body for Chat Completions.
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+            else:
+                kwargs["reasoning_effort"] = effort
         if tools:
             kwargs["tools"] = [
                 {
@@ -64,6 +73,19 @@ class OpenAIProvider:
                 ToolCall(id=item.id or "", name=item.function.name or "", arguments=arguments)
             )
 
+        # Keep the assistant message verbatim (content, tool_calls,
+        # reasoning_content) so reasoning is replayed in multi-turn tool loops.
+        raw_content: dict[str, Any] | None = None
+        if message.tool_calls or getattr(message, "reasoning_content", None):
+            raw_content = {"role": "assistant"}
+            if message.content is not None:
+                raw_content["content"] = message.content
+            if message.tool_calls:
+                raw_content["tool_calls"] = [item.model_dump() for item in message.tool_calls]
+            reasoning = getattr(message, "reasoning_content", None)
+            if reasoning:
+                raw_content["reasoning_content"] = reasoning
+
         usage = {}
         if response.usage is not None:
             details = getattr(response.usage, "prompt_tokens_details", None)
@@ -79,10 +101,16 @@ class OpenAIProvider:
             tool_calls=tool_calls,
             stop_reason=choice.finish_reason,
             usage=usage,
+            thinking=getattr(message, "reasoning_content", None),
+            raw_content=raw_content,
         )
 
     @staticmethod
     def _to_openai_message(message: Message) -> dict[str, Any]:
+        if message.role == "assistant" and message.raw_content:
+            # Replay the provider's assistant message verbatim, keeping
+            # reasoning_content so tool-loop reasoning survives.
+            return dict(message.raw_content)
         if message.role == "tool":
             return {
                 "role": "tool",

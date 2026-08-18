@@ -71,6 +71,8 @@ class AMAClientFoldProvider:
         self,
         messages: Sequence[Message],
         tools: Sequence[Any] | None = None,
+        *,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         system = "\n\n".join(str(m.content) for m in messages if m.role == "system" and m.content)
         prompt = "\n\n".join(str(m.content) for m in messages if m.role == "user" and m.content)

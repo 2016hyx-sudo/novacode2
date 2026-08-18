@@ -34,7 +34,7 @@ EPISODE = {
 
 
 class CannedProvider:
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, *, reasoning_effort=None):
         return LLMResponse(
             text="Answer[1]: (A)\nAnswer[2]: (B)",
             stop_reason="end_turn",

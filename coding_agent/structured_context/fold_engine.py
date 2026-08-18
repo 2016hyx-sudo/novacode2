@@ -95,6 +95,7 @@ class FoldEngine:
         trace: TraceWriter | None = None,
         provider_name: str = "",
         model: str = "",
+        reasoning_effort: str | None = None,
     ) -> None:
         self.provider = provider
         self.token_counter = token_counter or TokenCounter()
@@ -102,6 +103,9 @@ class FoldEngine:
         self.trace = trace
         self.provider_name = provider_name
         self.model = model
+        # Folding is summarization work; calls run at this effort (None defers
+        # to the provider config / provider default).
+        self.reasoning_effort = reasoning_effort
 
     def fold(
         self,
@@ -288,7 +292,9 @@ class FoldEngine:
         self._emit("llm_request", **prepared)
         started = time.monotonic()
         try:
-            response = self.provider.chat(messages, tools=tools)
+            response = self.provider.chat(
+                messages, tools=tools, reasoning_effort=self.reasoning_effort
+            )
         except Exception as exc:
             self._emit(
                 "llm_request_finished",

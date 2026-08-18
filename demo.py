@@ -57,6 +57,8 @@ class ScriptedDemoProvider:
         self,
         messages: Sequence[Message],
         tools: Sequence[ToolSchema] | None = None,
+        *,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
         if not tools:
             # Planner call.

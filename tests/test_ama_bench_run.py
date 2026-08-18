@@ -32,7 +32,7 @@ EPISODE = {
 class CannedProvider:
     """Fake LLM provider returning a fixed batch response."""
 
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, *, reasoning_effort=None):
         return LLMResponse(text="Answer[1]: (A)\nAnswer[2]: (B)", stop_reason="end_turn", usage={})
 
 
@@ -44,7 +44,7 @@ class FlakyProvider:
         self.empty = empty
         self.calls = 0
 
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, *, reasoning_effort=None):
         self.calls += 1
         if self.calls <= self.failures:
             if self.empty:

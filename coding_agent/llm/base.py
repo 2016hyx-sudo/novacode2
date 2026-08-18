@@ -52,6 +52,11 @@ class Message:
     name: str | None = None
     is_error: bool = False
     cache_control: bool = False
+    # Verbatim assistant content blocks as returned by the provider (thinking,
+    # text, tool_use with any signature/opaque data). Replayed unchanged so
+    # reasoning survives multi-turn tool loops. Provider-neutral: each adapter
+    # decides its own block shape.
+    raw_content: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"role": self.role}
@@ -67,6 +72,8 @@ class Message:
             data["is_error"] = True
         if self.cache_control:
             data["cache_control"] = True
+        if self.raw_content is not None:
+            data["raw_content"] = self.raw_content
         return data
 
     @classmethod
@@ -79,6 +86,7 @@ class Message:
             name=data.get("name"),
             is_error=bool(data.get("is_error", False)),
             cache_control=bool(data.get("cache_control", False)),
+            raw_content=data.get("raw_content"),
         )
 
 
@@ -90,6 +98,12 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     stop_reason: str | None = None
     usage: dict[str, Any] = field(default_factory=dict)
+    # Joined reasoning/thinking text, when the provider exposes it separately
+    # from the answer (e.g. Anthropic thinking blocks, OpenAI reasoning_content).
+    thinking: str | None = None
+    # Verbatim assistant content blocks from the response, replayed unchanged
+    # on the next turn (see Message.raw_content).
+    raw_content: list[dict[str, Any]] | None = None
     # Populated by AgentLoop/FoldEngine measurement wrappers, not providers.
     request_id: str | None = None
     normalized_usage: dict[str, Any] = field(default_factory=dict)
@@ -113,6 +127,12 @@ class LLMProvider(Protocol):
         self,
         messages: Sequence[Message],
         tools: Sequence[ToolSchema] | None = None,
+        *,
+        reasoning_effort: str | None = None,
     ) -> LLMResponse:
-        """Send messages and optional tool schemas, return a unified response."""
+        """Send messages and optional tool schemas, return a unified response.
+
+        ``reasoning_effort`` overrides the provider's configured effort for this
+        call ("none" | "low" | "high" | "max"); None defers to the config.
+        """
         ...

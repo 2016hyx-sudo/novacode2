@@ -347,10 +347,18 @@ class StructuredContext:
         self._invalidate_messages()
         return entry
 
-    def add_assistant(self, content: str | None, tool_calls: list[ToolCall] | None = None) -> None:
+    def add_assistant(
+        self,
+        content: str | None,
+        tool_calls: list[ToolCall] | None = None,
+        *,
+        raw_content: list[dict[str, Any]] | None = None,
+    ) -> None:
         self._ensure_group()
         assert self._current_group is not None
-        message = Message(role="assistant", content=content, tool_calls=tool_calls or [])
+        message = Message(
+            role="assistant", content=content, tool_calls=tool_calls or [], raw_content=raw_content
+        )
         self.add(message)
         self.event_log.append(
             "assistant_message",
@@ -358,6 +366,7 @@ class StructuredContext:
                 "group_id": self._current_group.group_id,
                 "content": content,
                 "tool_calls": [call.to_dict() for call in tool_calls or []],
+                "raw_content": raw_content,
             },
         )
 

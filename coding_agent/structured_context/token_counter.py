@@ -71,6 +71,12 @@ class TokenCounter:
                 total += cls.estimate_text(json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")))
             except TypeError:
                 total += 4
+        if message.raw_content:
+            for block in message.raw_content:
+                try:
+                    total += cls.estimate_text(json.dumps(block, ensure_ascii=False, separators=(",", ":")))
+                except TypeError:
+                    total += 4
         return total
 
     @classmethod

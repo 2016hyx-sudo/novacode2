@@ -28,7 +28,7 @@ class FoldLLM:
         self.fail = fail
         self.calls = 0
 
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, *, reasoning_effort=None):
         self.calls += 1
         if self.fail:
             raise RuntimeError("fold model unavailable")
@@ -194,7 +194,7 @@ def test_structured_harness_low_drift_resumes_and_structural_blocks(tmp_path: Pa
     harness = StructuredHarness(config)
 
     class NoopProvider:
-        def chat(self, messages, tools=None):
+        def chat(self, messages, tools=None, *, reasoning_effort=None):
             return LLMResponse(text="done", stop_reason="end_turn")
 
     harness.provider = NoopProvider()
@@ -324,7 +324,7 @@ def test_structured_harness_replan_after_high_drift(tmp_path: Path) -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def chat(self, messages, tools=None):
+        def chat(self, messages, tools=None, *, reasoning_effort=None):
             self.calls += 1
             if self.calls == 1:
                 return LLMResponse(text="1. replan inspect\n2. replan verify", stop_reason="end_turn")
@@ -371,7 +371,7 @@ def test_structured_harness_subagent_report_and_file_propagation(tmp_path: Path)
         def __init__(self) -> None:
             self.turns = 0
 
-        def chat(self, messages, tools=None):
+        def chat(self, messages, tools=None, *, reasoning_effort=None):
             self.turns += 1
             if self.turns == 1:
                 return LLMResponse(

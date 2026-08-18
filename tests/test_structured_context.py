@@ -242,7 +242,7 @@ def test_structured_harness_run_and_resume(tmp_path: Path) -> None:
     assert harness.structured_store.list_sessions()
 
     class FinalProvider:
-        def chat(self, messages, tools=None):
+        def chat(self, messages, tools=None, *, reasoning_effort=None):
             from coding_agent.llm.base import LLMResponse
 
             return LLMResponse(text="done", stop_reason="end_turn")

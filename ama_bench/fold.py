@@ -204,6 +204,8 @@ class NovaCodeMemoryBuilder:
                 max_attempts=self.config.fold_max_attempts,
                 max_input_chars=self.config.fold_max_input_chars,
             ),
+            # Offline memory building is summarization; skip reasoning there.
+            reasoning_effort="none",
         )
 
     # ------------------------------------------------------------------ construction

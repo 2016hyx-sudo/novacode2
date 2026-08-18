@@ -30,7 +30,7 @@ class JudgeProvider:
         self.responses = list(responses)
         self.calls = 0
 
-    def chat(self, messages, tools=None):
+    def chat(self, messages, tools=None, *, reasoning_effort=None):
         text = self.responses[min(self.calls, len(self.responses) - 1)]
         self.calls += 1
         return LLMResponse(text=text, stop_reason="end_turn", usage={})
