@@ -154,6 +154,42 @@ class UnresolvedItem:
 
 
 @dataclass
+class KeySequence:
+    """A significant action sequence / exploratory pattern worth keeping.
+
+    Unlike a Finding (a durable fact), a sequence records *how* the agent moved
+    — inverse action pairs, repeated maneuvers, blocked attempts — plus the
+    inferred intent, which later questions about strategy can only answer from
+    the pattern itself.
+    """
+
+    id: str
+    pattern: str  # what happened: the actions, with step numbers
+    intent: str  # why / what the agent was testing or achieving
+    step_range: str = ""
+    status: str = "valid"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "pattern": self.pattern,
+            "intent": self.intent,
+            "step_range": self.step_range,
+            "status": self.status,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> KeySequence:
+        return cls(
+            id=str(data["id"]),
+            pattern=str(data.get("pattern", "")),
+            intent=str(data.get("intent", "")),
+            step_range=str(data.get("step_range", "")),
+            status=str(data.get("status", "valid")),
+        )
+
+
+@dataclass
 class TaskState:
     schema_version: str = "1.0"
     task_id: str = ""
@@ -166,6 +202,7 @@ class TaskState:
     key_findings: list[Finding] = field(default_factory=list)
     decisions: list[Decision] = field(default_factory=list)
     unresolved: list[UnresolvedItem] = field(default_factory=list)
+    key_sequences: list[KeySequence] = field(default_factory=list)
     extensions: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -187,6 +224,7 @@ class TaskState:
             "key_findings": [item.to_dict() for item in self.key_findings],
             "decisions": [item.to_dict() for item in self.decisions],
             "unresolved": [item.to_dict() for item in self.unresolved],
+            "key_sequences": [item.to_dict() for item in self.key_sequences],
             "extensions": dict(self.extensions),
         }
 
@@ -205,6 +243,7 @@ class TaskState:
             key_findings=[Finding.from_dict(x) for x in data.get("key_findings") or []],
             decisions=[Decision.from_dict(x) for x in data.get("decisions") or []],
             unresolved=[UnresolvedItem.from_dict(x) for x in data.get("unresolved") or []],
+            key_sequences=[KeySequence.from_dict(x) for x in data.get("key_sequences") or []],
             extensions=dict(data.get("extensions") or {}),
         )
 

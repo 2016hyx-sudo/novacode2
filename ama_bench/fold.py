@@ -12,6 +12,8 @@ benchmark's ``ModelClient`` for the LLM-assisted fold path.
 """
 from __future__ import annotations
 
+import json
+import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -115,7 +117,15 @@ def _normalize_slots(tool_state: ToolState) -> None:
 
 @dataclass
 class MemoryBuildStats:
-    """Transparent summary of one memory construction run."""
+    """Transparent summary of one memory construction run.
+
+    Beyond counts, the stats carry the audit trail needed to debug answers:
+    a structural inventory of every pre-fold group, one record per fold
+    epoch (what the model folded, deltas applied, fallback/errors), and token
+    estimates before and after compression.  ``work_dir`` is populated only
+    when ``keep_work_dir`` is set; it points at the surviving build directory
+    (``groups.jsonl`` holds the full pre-fold content).
+    """
 
     steps: int = 0
     groups: int = 0
@@ -127,7 +137,14 @@ class MemoryBuildStats:
     fallback_folds: int = 0
     fold_calls: int = 0
     fold_errors: int = 0
+    pre_fold_tokens: int = 0
+    post_fold_tokens: int = 0
+    compact_task_evicted: list[dict[str, Any]] = field(default_factory=list)
+    compact_tool_evicted: list[dict[str, Any]] = field(default_factory=list)
+    work_dir: str | None = None
     notes: list[str] = field(default_factory=list)
+    group_inventory: list[dict[str, Any]] = field(default_factory=list)
+    fold_events: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -141,7 +158,14 @@ class MemoryBuildStats:
             "fallback_folds": self.fallback_folds,
             "fold_calls": self.fold_calls,
             "fold_errors": self.fold_errors,
+            "pre_fold_tokens": self.pre_fold_tokens,
+            "post_fold_tokens": self.post_fold_tokens,
+            "compact_task_evicted": self.compact_task_evicted,
+            "compact_tool_evicted": self.compact_tool_evicted,
+            "work_dir": self.work_dir,
             "notes": list(self.notes),
+            "group_inventory": [dict(item) for item in self.group_inventory],
+            "fold_events": [dict(event) for event in self.fold_events],
         }
 
 
@@ -210,7 +234,28 @@ class NovaCodeMemoryBuilder:
             groups.append(group)
             trajectory.groups.append(group)
             stats.groups += 1
+            stats.group_inventory.append(
+                {
+                    "id": group.group_id,
+                    "message_count": len(group.messages),
+                    "chars": sum(len(str(message.content or "")) for message in group.messages),
+                    "turn_range": _group_turn_range(group),
+                }
+            )
             event_log.append("tool_batch_closed", {"step": batch[-1].turn_idx, "call_ids": []})
+        stats.pre_fold_tokens = sum(
+            self.token_counter.estimate_text(
+                json.dumps(group.to_dict(), ensure_ascii=False, separators=(",", ":"))
+            )
+            for group in groups
+        )
+        # Full pre-fold content (all groups) — consumed by the audit trail when
+        # keep_work_dir is enabled; deleted with the work dir otherwise.
+        with (fold_dir / "groups.jsonl").open("w", encoding="utf-8") as handle:
+            for group in groups:
+                handle.write(
+                    json.dumps(group.to_dict(), ensure_ascii=False, separators=(",", ":")) + "\n"
+                )
 
         kept, folded, final_task, final_tool, final_trajectory = self._fold_all(
             groups=groups,
@@ -232,6 +277,8 @@ class NovaCodeMemoryBuilder:
                 tool_budget_tokens=self.config.compact_tool_budget_tokens,
             ),
         ).compact(task_state, tool_state, artifact_store=artifact_store)
+        stats.compact_task_evicted = compact_result.evicted_task_items
+        stats.compact_tool_evicted = compact_result.evicted_tool_items
         if compact_result.evicted_task_items or compact_result.evicted_tool_items:
             stats.notes.append(f"state compact evicted {compact_result.evicted_task_items} task / {compact_result.evicted_tool_items} tool items")
 
@@ -240,6 +287,9 @@ class NovaCodeMemoryBuilder:
         stats.groups_folded = folded
         stats.groups_kept = len(kept)
         _normalize_slots(tool_state)
+        stats.post_fold_tokens = self._estimate_memory_tokens(task_state, tool_state, trajectory)
+        if self.config.keep_work_dir:
+            stats.work_dir = str(fold_dir)
         if not self.config.keep_work_dir:
             for child in fold_dir.iterdir():
                 if child.is_dir():
@@ -298,6 +348,7 @@ class NovaCodeMemoryBuilder:
             )
             task_dict = result["task_dict"]
             tool_dict = result["tool_dict"]
+            stats.fold_events.append(self._fold_event(current_epoch + 1, len(foldable), result["fold_result"]))
             remaining = remaining[len(foldable) :]
             folded_total += len(foldable)
             current_epoch += 1
@@ -306,6 +357,32 @@ class NovaCodeMemoryBuilder:
         trajectory = Trajectory(epoch_id=current_epoch)
         trajectory.groups = remaining
         return remaining, folded_total, task_state, tool_state, trajectory
+
+    def _estimate_memory_tokens(self, task_state: TaskState, tool_state: ToolState, trajectory: Trajectory) -> int:
+        """Estimated tokens of the post-fold memory (state + kept trajectory)."""
+        task_text = json.dumps(task_state.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        tool_text = json.dumps(tool_state.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        recent_groups = sum(self.token_counter.estimate_messages(group.messages) for group in trajectory.groups)
+        return self.token_counter.estimate_text(task_text) + self.token_counter.estimate_text(tool_text) + recent_groups
+
+    @staticmethod
+    def _fold_event(epoch: int, groups_folded: int, fold_result: FoldResult) -> dict[str, Any]:
+        task_delta = fold_result.task_delta or {}
+        tool_delta = fold_result.tool_delta or {}
+        return {
+            "epoch": epoch,
+            "groups_folded": groups_folded,
+            "model_used": fold_result.model_used,
+            "fallback_used": fold_result.fallback_used,
+            "calls": fold_result.calls,
+            "retries": fold_result.retries,
+            "last_error": (fold_result.last_error or "")[:200],
+            "request_ids": list(fold_result.request_ids),
+            "logical_input_tokens": fold_result.logical_input_tokens,
+            "output_tokens": fold_result.output_tokens,
+            "task_delta_entries": len(task_delta.get("set") or {}) + len(task_delta.get("append") or []),
+            "tool_delta_entries": len(tool_delta.get("set") or {}) + len(tool_delta.get("append") or []),
+        }
 
     def _fold_batch(
         self,
@@ -419,8 +496,21 @@ def _count_task_entries(task_state: TaskState) -> int:
         + len(task_state.key_findings)
         + len(task_state.decisions)
         + len(task_state.unresolved)
+        + len(task_state.key_sequences)
     )
 
 
 def _count_tool_entries(tool_state: ToolState) -> int:
     return sum(len(entries) for profile in tool_state.profiles.values() for entries in profile.values())
+
+
+def _group_turn_range(group: InteractionGroup) -> str:
+    """First-last turn indices of a group, or '' when no turn markers exist."""
+    first = last = ""
+    for message in group.messages:
+        content = str(message.content or "")
+        match = re.search(r"Step\s+(\d+)", content)
+        if match:
+            first = first or match.group(1)
+            last = match.group(1)
+    return f"{first}-{last}" if first else ""

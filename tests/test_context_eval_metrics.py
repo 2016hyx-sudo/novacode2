@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from evals.structured_context.metrics import (
+    aggregate_usage,
     compare_summaries,
     compare_request_metrics,
     negative_reduction_rate,
@@ -135,3 +136,57 @@ def test_summary_gate_requires_metrics_and_row_gate_rejects_duplicates() -> None
     duplicate_gate = compare_request_metrics([row, row], [row])
     assert not duplicate_gate.passed
     assert duplicate_gate.failures[0]["type"] == "duplicate_request_identity"
+
+
+def test_aggregate_usage_sums_cache_fields_and_rate() -> None:
+    cached = RequestMetric(
+        task_case_id="a",
+        request_id="r1",
+        logical_input_tokens=2415,
+        cache_hit_tokens=2368,
+        fresh_processed_input_tokens=47,
+        token_source="provider_reported",
+        metadata={"raw_usage": {"output_tokens": 18}},
+    )
+    fresh = RequestMetric(
+        task_case_id="a",
+        request_id="r2",
+        logical_input_tokens=51,
+        cache_hit_tokens=0,
+        fresh_processed_input_tokens=51,
+        token_source="provider_reported",
+        metadata={"raw_usage": {"output_tokens": 8}},
+    )
+    usage = aggregate_usage([cached, fresh])
+    assert usage["request_count"] == 2
+    assert usage["logical_input_tokens"] == 2466
+    assert usage["cache_hit_tokens"] == 2368
+    assert usage["fresh_processed_input_tokens"] == 98
+    assert usage["output_tokens"] == 26
+    assert usage["cache_hit_rate"] == pytest.approx(2368 / 2466)
+
+
+def test_aggregate_usage_zero_denominator_has_none_rate() -> None:
+    usage = aggregate_usage(
+        [RequestMetric(task_case_id="a", request_id="r1", logical_input_tokens=0, cache_hit_tokens=0)]
+    )
+    assert usage["cache_hit_rate"] is None
+    assert usage["logical_input_tokens"] == 0
+
+
+def test_summaries_expose_usage_aggregation() -> None:
+    records = [
+        RequestMetric(
+            task_case_id="a",
+            request_id="r1",
+            variant="structured",
+            logical_input_tokens=100,
+            cache_hit_tokens=80,
+            fresh_processed_input_tokens=20,
+            token_source="provider_reported",
+        )
+    ]
+    for mode in ("offline", "full-run"):
+        summary = summarize_metrics(records, mode=mode)
+        assert summary["usage"]["cache_hit_tokens"] == 80
+        assert summary["usage"]["cache_hit_rate"] == pytest.approx(0.8)

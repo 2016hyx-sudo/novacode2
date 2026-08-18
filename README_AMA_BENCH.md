@@ -57,14 +57,42 @@ huggingface-cli download AMA-bench/AMA-bench --repo-type dataset --local-dir ./d
 
 # 3. Run a few episodes
 python -m ama_bench.run \
-  --dataset dataset/test/mcq_set.jsonl \
+  --dataset dataset/test/open_end_qa_set.jsonl \
   --episode-ids 0,1,2 \
-  --output results/novacode_mcq.jsonl
+  --output results/novacode_openend.jsonl
 ```
 
 CLI options: `--subset` (auto-detected from the file name), `--samples N`,
-`--per-question` (one LLM call per question instead of one batch), `--max-tokens`,
-and provider overrides `--provider / --model / --api-key / --base-url`.
+`--batch` (all questions of an episode in one LLM call instead of the default
+one call per question), `--max-tokens`, `--method-config`, and provider
+overrides `--provider / --model / --api-key / --base-url`.  Every run also
+writes one audit JSON per episode (see below).
+
+### Audit trail (debugging a run)
+
+Each episode gets an audit file `<audit-dir>/<episode_id>.json` (default:
+`<output parent>/audit`) tracing the full pipeline — input trajectory, the
+pre-fold group inventory, every fold epoch (model used, deltas, fallback,
+errors), the post-fold memory summary, per-question retrieval (top-k scores,
+evidence hash), the exact prompt sent, the answer, and per-call usage
+(cache-hit tokens included).  Results records carry `audit_path` plus a compact
+`memory` summary (pre/post-fold tokens, residual ratio, fold counts) so the
+results JSONL alone shows how much each trajectory was compressed.
+
+```bash
+python -m ama_bench.run \
+  --dataset dataset/test/open_end_qa_set.jsonl \
+  --episode-ids 0,1,2 \
+  --output results/novacode_openend.jsonl \
+  --audit-dir results/audit \
+  --audit-full          # full pre-fold groups, evidence and prompts
+```
+
+`--audit-full` records full content (larger files; also implies
+`--keep-work-dir` so `groups.jsonl` survives).  Without it the audit stores
+hashes, char counts and scores — enough to spot *where* an answer went wrong
+(memory loss vs retrieval miss vs generation), and the exact content is one
+`--audit-full` re-run away.
 
 ### Judge the answers (self-contained LLM-as-judge)
 
@@ -75,7 +103,7 @@ AMA-Bench checkout needed:
 
 ```bash
 python -m ama_bench.judge \
-  --answers-file results/novacode_mcq.jsonl \
+  --answers-file results/novacode_openend.jsonl \
   --test-file dataset/test/open_end_qa_set.jsonl \
   --output-file results/evaluation.json
 ```
@@ -87,7 +115,7 @@ YAML with `--judge-config configs/llm_judge.yaml` (needs `pyyaml`).
 
 ### Downloading the dataset
 
-The official dataset (`AMA-bench/AMA-bench`, single 558 MB file
+The official dataset (`AMA-bench/AMA-bench`, single ~50 MB file
 `test/open_end_qa_set.jsonl`, **open-end subset only** — there is no
 `mcq_set.jsonl` in the repo) may be slow or blocked from some networks.  The
 HuggingFace mirror is a reliable alternative:
@@ -134,7 +162,7 @@ python src/run.py \
   --llm-server api \
   --llm-config configs/gpt-5.2.yaml \
   --judge-config configs/llm_judge.yaml \
-  --subset mcq \
+  --subset openend \
   --method novacode \
   --episode-ids 0,1,2
 ```

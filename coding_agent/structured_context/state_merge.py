@@ -12,6 +12,7 @@ TASK_LIST_TARGETS = {
     "key_findings": ("key_findings",),
     "decisions": ("decisions",),
     "unresolved": ("unresolved",),
+    "key_sequences": ("key_sequences",),
 }
 
 TOOL_LIST_TARGETS = {

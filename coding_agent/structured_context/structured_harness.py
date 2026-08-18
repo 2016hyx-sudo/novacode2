@@ -22,6 +22,7 @@ from .session_lock import SessionLock
 from .session_store import StructuredSessionStore
 from .structured_context import StructuredContext, StructuredContextConfig
 from .subagent_report import parse_subagent_report
+from .usage_stats import UsageEventAggregator, UsageStats
 
 
 class StructuredHarness(Harness):
@@ -36,8 +37,9 @@ class StructuredHarness(Harness):
         listeners: list[Callable[[TraceEvent], None]] | None = None,
     ) -> None:
         session_dir, trace_dir = self._resolve_dirs(config)
+        self.usage_aggregator = UsageEventAggregator()
         if trace is None:
-            trace = TraceWriter(trace_dir, listeners=listeners)
+            trace = TraceWriter(trace_dir, listeners=(listeners or []) + [self.usage_aggregator])
         if provider is None:
             from ..llm import create_provider
 
@@ -187,6 +189,7 @@ class StructuredHarness(Harness):
         )
         self._new_context(session, self.workspace)
         self.trace.bind(session_id)
+        self.usage_aggregator.stats.reset()
         self.trace.emit(
             "session_start",
             session_id=session_id,
@@ -253,6 +256,7 @@ class StructuredHarness(Harness):
             context.session.status = "recovery_pending"
 
         self.trace.bind(session_id)
+        self.usage_aggregator.stats = UsageStats.from_dict(session.metrics.get("usage") or {})
         self.trace.emit(
             "session_resume",
             session_id=session_id,
@@ -342,6 +346,10 @@ class StructuredHarness(Harness):
         metrics["total_steps"] = int(metrics.get("total_steps", 0)) + result.steps_used
         metrics["total_tool_calls"] = int(metrics.get("total_tool_calls", 0)) + result.tool_calls_used
         metrics["token_calibration"] = context.token_counter.calibration.to_dict()
+        # Session-level usage aggregation (requests, tokens, cache hit rate) —
+        # written to both the trace (session_metrics event) and the checkpointed
+        # session metrics dict, so it survives resume and feeds offline replay.
+        metrics["usage"] = self.usage_aggregator.stats.to_dict()
         if self.trace is not None:
             self.trace.emit("session_metrics", **metrics)
 

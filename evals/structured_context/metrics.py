@@ -334,6 +334,46 @@ def _summarize_full_run(records: Sequence[Record]) -> dict[str, Any]:
         "fold": {"input_tokens": fold_input, "request_count": sum(
             1 for record in records if str(_get(record, "agent_role", default="main")) == "fold"
         )},
+        "usage": aggregate_usage(records),
+    }
+
+
+def aggregate_usage(records: Iterable[Record]) -> dict[str, Any]:
+    """Aggregate provider-reported cache/usage fields across records.
+
+    Cache hit rate uses the same ``cache_hit_tokens / logical_input_tokens``
+    semantics as ``normalize_usage`` (``coding_agent.llm.usage``).  Output
+    tokens are read from the record when exposed; otherwise they fall back to
+    the raw provider usage stored in ``metadata.raw_usage``.
+    """
+
+    request_count = 0
+    logical = 0
+    cache_hit = 0
+    fresh = 0
+    output = 0
+    for record in records:
+        request_count += 1
+        logical += int(_number(_get(record, "logical_input_tokens", default=0)))
+        cache_hit += int(_number(_get(record, "cache_hit_tokens", default=0)))
+        fresh += int(_number(_get(record, "fresh_processed_input_tokens", default=0)))
+        record_output = int(_number(_get(record, "output_tokens", default=0)))
+        if not record_output:
+            raw_usage = _get(record, "metadata", default={})
+            if isinstance(raw_usage, Mapping):
+                raw_usage = raw_usage.get("raw_usage") or {}
+            if isinstance(raw_usage, Mapping):
+                record_output = int(
+                    _number(raw_usage.get("output_tokens") or raw_usage.get("completion_tokens"))
+                )
+        output += record_output
+    return {
+        "request_count": request_count,
+        "logical_input_tokens": logical,
+        "cache_hit_tokens": cache_hit,
+        "fresh_processed_input_tokens": fresh,
+        "output_tokens": output,
+        "cache_hit_rate": cache_hit / logical if logical else None,
     }
 
 
@@ -389,6 +429,7 @@ def summarize_metrics(records: Iterable[Record], *, mode: str = "offline") -> di
             "input_tokens": _fold_overhead(all_records),
             "request_count": len(folds),
         },
+        "usage": aggregate_usage(all_records),
     }
 
 

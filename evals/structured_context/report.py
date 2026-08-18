@@ -100,6 +100,7 @@ def render_report(summary: Mapping[str, Any], requests: Sequence[RequestMetric])
     input_tokens = dict(summary.get("input_tokens") or {})
     structured = dict(input_tokens.get("structured") or {})
     raw = dict(input_tokens.get("raw_full") or {})
+    usage = dict(summary.get("usage") or {})
     sample = dict(summary.get("sample") or {})
     quality = dict(summary.get("quality") or {})
     gates = dict(summary.get("gates") or {})
@@ -124,6 +125,15 @@ def render_report(summary: Mapping[str, Any], requests: Sequence[RequestMetric])
         "| --- | ---: | ---: | ---: | ---: |",
         f"| raw_full | {_number(raw.get('p50'))} | {_number(raw.get('p95'))} | {_number(raw.get('max'))} | {_number(raw.get('count'))} |",
         f"| structured | {_number(structured.get('p50'))} | {_number(structured.get('p95'))} | {_number(structured.get('max'))} | {_number(structured.get('count'))} |",
+        "",
+        "## Usage",
+        "",
+        f"- Requests: {_number(usage.get('request_count'))}",
+        f"- Logical input tokens: {_number(usage.get('logical_input_tokens'))}",
+        f"- Cache-hit tokens: {_number(usage.get('cache_hit_tokens'))}",
+        f"- Fresh input tokens: {_number(usage.get('fresh_processed_input_tokens'))}",
+        f"- Output tokens: {_number(usage.get('output_tokens'))}",
+        f"- Cache hit rate: {_percent(usage.get('cache_hit_rate'))}",
         "",
         "## Sample",
         "",

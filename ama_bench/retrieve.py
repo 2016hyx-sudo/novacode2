@@ -85,6 +85,14 @@ def score_candidates(memory: NovaCodeMemory, question: str, *, top_k: int = 8) -
             {"type": "decision", "id": decision.id, "score": _score_text(text, question_terms), "text": text, "meta": {"status": decision.status}}
         )
 
+    for sequence in memory.task_state.key_sequences:
+        # Intent carries the answer to "why"-style questions; weight it above the pattern.
+        text = f"{sequence.pattern} {sequence.intent}"
+        score = _score_text(sequence.intent, question_terms) * 2 + _score_text(sequence.pattern, question_terms)
+        scored.append(
+            {"type": "sequence", "id": sequence.id, "score": score, "text": text, "meta": {"status": sequence.status, "step_range": sequence.step_range}}
+        )
+
     for profile in memory.tool_state.profiles.values():
         for slot, entries in profile.items():
             for entry in entries:

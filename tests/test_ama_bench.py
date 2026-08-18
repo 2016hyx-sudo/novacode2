@@ -81,6 +81,28 @@ def test_retrieval_ranks_apple_evidence_first() -> None:
     assert "pie" in blob or "4 apples" in blob
 
 
+def test_retrieval_surfaces_key_sequences_for_intent_questions() -> None:
+    from coding_agent.structured_context.models import KeySequence
+
+    memory = NovaCodeMemoryBuilder().build(parse_trajectory_text(SAMPLE_TRAJECTORY), task="collect items")
+    memory.task_state.key_sequences.append(
+        KeySequence(
+            id="k-1",
+            pattern="grab apple at step 1, then read recipes at step 2",
+            intent="collect the apple before checking the recipe",
+            step_range="1-2",
+        )
+    )
+    candidates = score_candidates(memory, "Why did the agent pick up the apple first?")
+    assert candidates
+    top = candidates[0]
+    assert top["type"] == "sequence"
+    assert "collect the apple" in top["text"].lower()
+    assert top["meta"]["step_range"] == "1-2"
+    rendered = render_evidence(candidates)
+    assert "step_range=1-2" in rendered
+
+
 def test_render_evidence_shapes() -> None:
     memory = NovaCodeMemoryBuilder().build(parse_trajectory_text(SAMPLE_TRAJECTORY))
     rendered = render_evidence(score_candidates(memory, "apple"))

@@ -10,9 +10,18 @@ comes from AMA-Bench's ``evaluate.py`` (run it on the same results file).
 Usage:
 
     python -m ama_bench.run \\
-        --dataset dataset/test/mcq_set.jsonl \\
+        --dataset dataset/test/open_end_qa_set.jsonl \\
         --episode-ids 0,1,2 \\
-        --output results/novacode_mcq.jsonl
+        --output results/novacode_openend.jsonl \\
+        --audit-dir results/audit \\
+        --audit-full
+
+Every episode writes an audit JSON (``<audit-dir>/<episode_id>.json``, compact
+by default) tracing memory build -> fold -> retrieval -> answer, so a bad
+answer can be debugged back to the exact stage.  ``--audit-full`` records full
+pre-fold groups, evidence and prompts; ``--method-config`` points at a
+JSON/YAML config (``max_context_tokens`` / ``fold_max_attempts`` /
+``keep_work_dir``).
 
 Provider configuration comes from the environment / ``.env`` exactly like the
 main NovaCode CLI (``NOVACODE_PROVIDER``, ``NOVACODE_MODEL``, ``OPENAI_API_KEY``
@@ -29,11 +38,15 @@ from pathlib import Path
 from typing import Any
 
 from coding_agent.llm import LLMProvider, Message, create_provider
+from coding_agent.llm.usage import normalize_usage
 from config import LLMConfig, load_env_file
 
+from .audit import build_audit_record, compact_memory_stats, record_question, write_audit
 from .extract import parse_answer_blocks
 from .io import iter_jsonl_records
+from .memory import NovaCodeMemory
 from .method import NovaCodeMemoryMethod
+from .retrieve import score_candidates
 
 
 def load_episodes(dataset: str | Path) -> list[dict[str, Any]]:
@@ -100,6 +113,8 @@ def run_episode(
     max_tokens: int = 4096,
     per_question: bool = True,
     progress: Callable[[int, int], None] | None = None,
+    audit_dir: str | Path | None = None,
+    audit_full: bool = False,
 ) -> dict[str, Any]:
     """Run one episode: build memory, answer every question, return a result record.
 
@@ -113,6 +128,13 @@ def run_episode(
     failed per-question call records an empty answer and the episode continues,
     so one timeout does not abort the episode; the caller persists the episode
     once it completes.
+
+    With ``audit_dir`` set, the episode's full pipeline record — pre-fold group
+    inventory, fold events, post-fold memory, per-question retrieval and
+    prompts — is written to ``<audit_dir>/<episode_id>.json`` and the result
+    gains ``audit_path`` plus a compact ``memory`` compression summary.
+    ``audit_full`` additionally records full pre-fold groups, evidence and
+    prompts (larger files; also keeps the fold work directory).
     """
     episode_id = int(episode.get("episode_id", 0))
     task = str(episode.get("task", ""))
@@ -121,16 +143,27 @@ def run_episode(
     mcq_mode = subset == "mcq"
 
     memory = method.memory_construction(trajectory_text, task=task)
+    audit_questions: list[dict[str, Any]] = []
     if not questions:
-        return {"episode_id": episode_id, "answer_list": [], "reasoning_trace": ""}
+        base = {
+            "episode_id": episode_id,
+            "answer_list": [],
+            "reasoning_trace": "",
+            "usage": _merge_usage([]),
+        }
+        return _with_audit(base, memory, episode, audit_questions, audit_dir, audit_full)
 
+    usages: list[dict[str, Any]] = []
     if per_question:
         answer_list: list[str] = []
         for index, question in enumerate(questions, start=1):
             answer = ""
+            prompt = ""
+            usage: dict[str, Any] = {}
             try:
                 prompt = method.build_prompt(memory, [question], mcq_mode=mcq_mode)
-                response = _query(provider, prompt, max_tokens=max_tokens)
+                response, usage = _query_with_usage(provider, prompt, max_tokens=max_tokens)
+                usages.append(usage)
                 parsed = parse_answer_blocks(response, 1, mcq_mode=mcq_mode)
                 answer = parsed[0] if parsed else ""
             except Exception as exc:  # one bad call must not lose the episode
@@ -139,24 +172,87 @@ def run_episode(
                     file=sys.stderr,
                     flush=True,
                 )
+            if audit_dir is not None:
+                audit_questions.append(
+                    record_question(
+                        question=question,
+                        candidates=score_candidates(memory, question),
+                        prompt=prompt,
+                        answer=answer,
+                        usage=usage,
+                        full=audit_full,
+                        evidence_budget=3_000,
+                    )
+                )
             answer_list.append(answer)
             if progress is not None:
                 progress(index, len(questions))
     else:
         prompt = method.build_prompt(memory, questions, mcq_mode=mcq_mode)
-        response = _query(provider, prompt, max_tokens=max_tokens)
+        response, usage = _query_with_usage(provider, prompt, max_tokens=max_tokens)
+        usages.append(usage)
         answer_list = parse_answer_blocks(response, len(questions), mcq_mode=mcq_mode)
         if len(answer_list) != len(questions):
             answer_list = _repair_answers(answer_list, questions, mcq_mode)
+        if audit_dir is not None:
+            # One LLM call answered every question; each question record
+            # shares the batch prompt and the call's usage (first record only,
+            # the merged total lives in ``outcome.usage``).
+            for index, (question, answer) in enumerate(zip(questions, answer_list), start=1):
+                audit_questions.append(
+                    record_question(
+                        question=question,
+                        candidates=score_candidates(memory, question),
+                        prompt=prompt,
+                        answer=answer,
+                        usage=usage if index == 1 else {},
+                        full=audit_full,
+                        evidence_budget=2_000,
+                    )
+                )
 
-    return {
+    result = {
         "episode_id": episode_id,
         "answer_list": answer_list,
         "reasoning_trace": "",
+        "usage": _merge_usage(usages),
     }
+    return _with_audit(result, memory, episode, audit_questions, audit_dir, audit_full)
 
 
-def _query(
+def _with_audit(
+    result: dict[str, Any],
+    memory: NovaCodeMemory,
+    episode: dict[str, Any],
+    audit_questions: list[dict[str, Any]],
+    audit_dir: str | Path | None,
+    audit_full: bool,
+) -> dict[str, Any]:
+    """Attach the per-episode audit trail to a result record (optional).
+
+    Writes ``<audit_dir>/<episode_id>.json`` and augments ``result`` with
+    ``audit_path`` and the compact ``memory`` compression summary so the
+    results JSONL alone already shows how much the trajectory was compressed
+    and where the audit file for each episode lives.
+    """
+    if audit_dir is None:
+        return result
+    record = build_audit_record(
+        episode=episode,
+        memory=memory,
+        questions=audit_questions,
+        outcome={
+            "answer_list": result["answer_list"],
+            "reasoning_trace": result["reasoning_trace"],
+            "usage": result.get("usage") or {},
+        },
+        full=audit_full,
+    )
+    path = write_audit(record, Path(audit_dir))
+    return {**result, "audit_path": str(path), "memory": compact_memory_stats(memory.stats)}
+
+
+def _query_with_usage(
     provider: LLMProvider,
     prompt: str,
     *,
@@ -164,8 +260,11 @@ def _query(
     max_retries: int = 4,
     base_delay: float = 3.0,
     max_delay: float = 60.0,
-) -> str:
+) -> tuple[str, dict[str, Any]]:
     """Call the provider, retrying transient failures and empty responses.
+
+    Returns ``(text, normalized_usage)`` so results records carry per-call
+    token and cache-hit accounting alongside the answer.
 
     The proxy endpoint intermittently drops connections or returns empty text,
     so retries happen on both ``LLMError``/``Exception`` (connection errors,
@@ -188,7 +287,7 @@ def _query(
             response = provider.chat([Message(role="user", content=prompt)], tools=None)
             text = str(response.text or "")
             if text.strip():
-                return text
+                return text, normalize_usage(response.usage)
             reason = "empty response"
         except Exception as exc:
             reason = f"{type(exc).__name__}: {exc}"
@@ -202,6 +301,64 @@ def _query(
         )
         time.sleep(delay)
     raise LLMError(f"query failed after {max_retries} attempts: {reason}", retryable=True)
+
+
+def _query(
+    provider: LLMProvider,
+    prompt: str,
+    *,
+    max_tokens: int,
+    max_retries: int = 4,
+    base_delay: float = 3.0,
+    max_delay: float = 60.0,
+) -> str:
+    """Call the provider and return just the text (see ``_query_with_usage``)."""
+    text, _ = _query_with_usage(
+        provider,
+        prompt,
+        max_tokens=max_tokens,
+        max_retries=max_retries,
+        base_delay=base_delay,
+        max_delay=max_delay,
+    )
+    return text
+
+
+def _merge_usage(usages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum per-call normalized usage into one episode/run-level summary.
+
+    Keeps the same keys as the session-level aggregation
+    (``UsageStats.to_dict``) and the eval summary (``aggregate_usage``), so
+    the cache hit rate has one definition everywhere.
+    """
+    logical = sum(int(item.get("logical_input_tokens") or 0) for item in usages)
+    cache_hit = sum(int(item.get("cache_hit_tokens") or 0) for item in usages)
+    fresh = sum(int(item.get("fresh_processed_input_tokens") or 0) for item in usages)
+    output = sum(int(item.get("output_tokens") or 0) for item in usages)
+    return {
+        "request_count": len(usages),
+        "logical_input_tokens": logical,
+        "cache_hit_tokens": cache_hit,
+        "fresh_processed_input_tokens": fresh,
+        "output_tokens": output,
+        "cache_hit_rate": cache_hit / logical if logical else 0.0,
+    }
+
+
+def _merge_memory_stats(memories: list[dict[str, Any] | None]) -> dict[str, int]:
+    """Sum per-episode compact memory summaries into one run-level view."""
+    merged = {"episodes": 0, "pre": 0, "post": 0, "groups": 0, "folded": 0, "model": 0, "fallback": 0}
+    for memory in memories:
+        if not memory:
+            continue
+        merged["episodes"] += 1
+        merged["pre"] += int(memory.get("pre_fold_tokens") or 0)
+        merged["post"] += int(memory.get("post_fold_tokens") or 0)
+        merged["groups"] += int(memory.get("groups") or 0)
+        merged["folded"] += int(memory.get("groups_folded") or 0)
+        merged["model"] += int(memory.get("model_folds") or 0)
+        merged["fallback"] += int(memory.get("fallback_folds") or 0)
+    return merged
 
 
 _QUERY_TIMEOUT_SECONDS = 180.0
@@ -343,6 +500,26 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Answer all questions of an episode in one LLM call (default: one call per question, which is more reliable)",
     )
+    parser.add_argument(
+        "--audit-dir",
+        default=None,
+        help="Per-episode audit JSON directory (default: <output parent>/audit)",
+    )
+    parser.add_argument(
+        "--audit-full",
+        action="store_true",
+        help="Record full pre-fold groups, evidence and prompts in audits (larger files)",
+    )
+    parser.add_argument(
+        "--method-config",
+        default=None,
+        help="NovaCode memory method config (JSON/YAML), e.g. max_context_tokens / fold_max_attempts / keep_work_dir",
+    )
+    parser.add_argument(
+        "--keep-work-dir",
+        action="store_true",
+        help="Keep the fold build directory (groups.jsonl) on disk; implied by --audit-full",
+    )
     parser.add_argument("--provider", default=None, help="Overrides NOVACODE_PROVIDER")
     parser.add_argument("--model", default=None, help="Overrides NOVACODE_MODEL")
     parser.add_argument("--api-key", default=None, help="Overrides the provider API key")
@@ -368,10 +545,16 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"[ama] subset={subset} episodes={len(selected)}")
 
-    method = NovaCodeMemoryMethod()
+    audit_dir = Path(args.audit_dir) if args.audit_dir else (Path(args.output).parent / "audit")
+    keep_work_dir = bool(args.keep_work_dir or args.audit_full)
+    method = NovaCodeMemoryMethod(
+        config_path=args.method_config,
+        keep_work_dir=keep_work_dir,
+    )
     provider = build_provider(args)
     mode = "per-question" if not args.batch else "batch"
     print(f"[ama] mode={mode}")
+    print(f"[ama] audit: {audit_dir}" + (" (full)" if args.audit_full else " (compact)"))
 
     results = []
     for index, episode in enumerate(selected, start=1):
@@ -383,6 +566,8 @@ def main(argv: list[str] | None = None) -> int:
             subset=subset,
             max_tokens=args.max_tokens,
             per_question=not args.batch,
+            audit_dir=audit_dir,
+            audit_full=args.audit_full,
             progress=(
                 (lambda done, total, eid=episode_id: print(
                     f"[ama]   episode {eid}: answered {done}/{total}", flush=True
@@ -399,6 +584,28 @@ def main(argv: list[str] | None = None) -> int:
 
     output = write_results(args.output, results)
     print(f"[ama] results written to {output}")
+
+    total_usage = _merge_usage([result["usage"] for result in results if result.get("usage")])
+    print(
+        f"[ama] usage: {total_usage['request_count']} requests, "
+        f"{total_usage['logical_input_tokens']} input tokens "
+        f"({total_usage['cache_hit_tokens']} cache-hit, {total_usage['fresh_processed_input_tokens']} fresh), "
+        f"{total_usage['output_tokens']} output, cache hit rate {total_usage['cache_hit_rate'] * 100:.1f}%"
+    )
+
+    memory_summary = _merge_memory_stats([result.get("memory") for result in results])
+    if memory_summary["episodes"]:
+        ratio = (
+            memory_summary["post"] / memory_summary["pre"] * 100
+            if memory_summary["pre"]
+            else 0.0
+        )
+        print(
+            f"[ama] memory: pre={memory_summary['pre']} tok, post={memory_summary['post']} tok, "
+            f"residual {ratio:.1f}%, folded {memory_summary['folded']}/{memory_summary['groups']} groups "
+            f"({memory_summary['model']} model, {memory_summary['fallback']} fallback folds)"
+        )
+    print(f"[ama] audit files written to {audit_dir}")
 
     stats = exact_match_accuracy(results, selected, subset=subset)
     if stats["accuracy"] is None:

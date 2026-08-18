@@ -115,6 +115,7 @@ class StateCompactor:
         task_state.key_findings = new_task_state.key_findings
         task_state.decisions = new_task_state.decisions
         task_state.unresolved = new_task_state.unresolved
+        task_state.key_sequences = new_task_state.key_sequences
         task_state.extensions = new_task_state.extensions
         tool_state.schema_version = new_tool_state.schema_version
         tool_state.profiles = new_tool_state.profiles

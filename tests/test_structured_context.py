@@ -50,6 +50,50 @@ def test_state_delta_merge() -> None:
     assert notes
 
 
+def test_key_sequences_merge_and_roundtrip() -> None:
+    state = TaskState.new(task_id="t", objective="o").to_dict()
+    merge_task_delta(
+        state,
+        {
+            "append": [
+                {
+                    "target": "key_sequences",
+                    "dedupe_key": "id",
+                    "item": {
+                        "id": "k-1",
+                        "pattern": "down (step 7) then up (step 8)",
+                        "intent": "push a block, then revert the rule change",
+                        "step_range": "7-8",
+                        "status": "valid",
+                    },
+                }
+            ]
+        },
+    )
+    assert state["key_sequences"][0]["id"] == "k-1"
+    restored = TaskState.from_dict(state)
+    assert restored.key_sequences[0].pattern == "down (step 7) then up (step 8)"
+    assert restored.key_sequences[0].intent == "push a block, then revert the rule change"
+    assert restored.key_sequences[0].step_range == "7-8"
+
+
+def test_fold_prompt_instructs_key_sequences() -> None:
+    from coding_agent.llm.base import Message
+    from coding_agent.structured_context.fold_engine import FoldEngine
+    from coding_agent.structured_context.models import InteractionGroup, ToolState
+
+    group = InteractionGroup(group_id="g-1", epoch_id=0, created_step=0)
+    group.messages.append(Message(role="user", content="hello"))
+    engine = FoldEngine(None)
+    messages = engine._build_request_messages(
+        TaskState.new(task_id="t", objective="o"), ToolState.new(), [group]
+    )
+    system_prompt = messages[0].content
+    assert "key_sequences" in system_prompt
+    assert "intent" in system_prompt
+    assert "exploratory" in system_prompt
+
+
 def test_workspace_diff(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
