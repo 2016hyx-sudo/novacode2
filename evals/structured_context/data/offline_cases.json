@@ -1,0 +1,276 @@
+{
+  "schema_version": "1.0",
+  "suite": "offline-core-12",
+  "description": "Deterministic recipes for materializing request histories. No expected CRR or percentile is stored in source data.",
+  "cases": [
+    {
+      "id": "offline-short-01",
+      "bucket": "short-control",
+      "description": "Small conversation with no tool result above the compression threshold.",
+      "generator": {
+        "seed": 9001,
+        "logical_window_tokens": 256000,
+        "interaction_groups": 3,
+        "group_profile": "one-user-one-assistant",
+        "tool_results": [{"tool": "read_file", "count": 1, "chars_each": 1200, "content_profile": "python-source", "critical_marker_position": "middle"}],
+        "state_items": {"task_findings": 2, "task_decisions": 1, "tool_entries": 1},
+        "language_mix": ["en", "python"]
+      },
+      "expected": {"tool_compression": false, "fold": false, "state_compact": false, "protected_recent_groups": 3},
+      "assertions": [
+        {"type": "raw_equals_observation"},
+        {"type": "artifact_roundtrip"},
+        {"type": "all_groups_protocol_complete"}
+      ]
+    },
+    {
+      "id": "offline-threshold-below-02",
+      "bucket": "tool-output-heavy",
+      "description": "Tool result immediately below the local 2K-token estimate threshold.",
+      "generator": {
+        "seed": 9002,
+        "logical_window_tokens": 256000,
+        "interaction_groups": 4,
+        "group_profile": "single-read-call",
+        "tool_results": [{"tool": "read_file", "count": 2, "chars_each": 7900, "content_profile": "python-source", "critical_marker_position": "middle"}],
+        "state_items": {"task_findings": 4, "task_decisions": 1, "tool_entries": 2},
+        "language_mix": ["en", "python"]
+      },
+      "expected": {"tool_compression": false, "fold": false, "state_compact": false, "protected_recent_groups": 3},
+      "assertions": [
+        {"type": "compression_boundary_side", "value": "below"},
+        {"type": "raw_equals_observation"},
+        {"type": "artifact_roundtrip"}
+      ]
+    },
+    {
+      "id": "offline-threshold-above-03",
+      "bucket": "tool-output-heavy",
+      "description": "Tool result immediately above the local 2K-token estimate threshold.",
+      "generator": {
+        "seed": 9003,
+        "logical_window_tokens": 256000,
+        "interaction_groups": 4,
+        "group_profile": "single-read-call",
+        "tool_results": [{"tool": "read_file", "count": 2, "chars_each": 8100, "content_profile": "python-source", "critical_marker_position": "tail"}],
+        "state_items": {"task_findings": 4, "task_decisions": 1, "tool_entries": 2},
+        "language_mix": ["en", "python"]
+      },
+      "expected": {"tool_compression": true, "fold": false, "state_compact": false, "protected_recent_groups": 3},
+      "assertions": [
+        {"type": "compression_boundary_side", "value": "above"},
+        {"type": "observation_contains_artifact_id"},
+        {"type": "critical_marker_recoverable"}
+      ]
+    },
+    {
+      "id": "offline-shell-20k-04",
+      "bucket": "tool-output-heavy",
+      "description": "Repeated 20K shell outputs with the failure marker near the tail.",
+      "generator": {
+        "seed": 9004,
+        "logical_window_tokens": 256000,
+        "interaction_groups": 8,
+        "group_profile": "single-shell-call",
+        "tool_results": [{"tool": "run_shell", "count": 6, "chars_each": 20000, "content_profile": "test-failure-stream", "critical_marker_position": "last-5-percent"}],
+        "state_items": {"task_findings": 8, "task_decisions": 2, "tool_entries": 6},
+        "language_mix": ["en", "python", "log"]
+      },
+      "expected": {"tool_compression": true, "fold": false, "state_compact": false, "protected_recent_groups": 3},
+      "assertions": [
+        {"type": "observation_within_tool_cap", "tool": "run_shell"},
+        {"type": "critical_marker_in_observation_or_artifact"},
+        {"type": "raw_greater_than_observation"}
+      ]
+    },
+    {
+      "id": "offline-read-100k-05",
+      "bucket": "tool-output-heavy",
+      "description": "Large source reads requiring Artifact recovery for a marker omitted from head/tail.",
+      "generator": {
+        "seed": 9005,
+        "logical_window_tokens": 256000,
+        "interaction_groups": 10,
+        "group_profile": "grep-then-read",
+        "tool_results": [
+          {"tool": "grep_search", "count": 3, "chars_each": 18000, "content_profile": "python-source", "critical_marker_position": "middle"},
+          {"tool": "read_file", "count": 5, "chars_each": 100000, "content_profile": "python-source", "critical_marker_position": "middle"}
+        ],
+        "state_items": {"task_findings": 12, "task_decisions": 3, "tool_entries": 8},
+        "language_mix": ["en", "python"]
+      },
+      "expected": {"tool_compression": true, "fold": false, "state_compact": false, "protected_recent_groups": 3},
+      "assertions": [
+        {"type": "observation_contains_artifact_id"},
+        {"type": "critical_marker_omitted_from_observation"},
+        {"type": "critical_marker_recoverable"},
+        {"type": "artifact_byte_exact"}
+      ]
+    },
+    {
+      "id": "offline-mixed-tools-06",
+      "bucket": "tool-output-heavy",
+      "description": "Mixed read, grep, list and shell caps in the same trajectory.",
+      "generator": {
+        "seed": 9006,
+        "logical_window_tokens": 256000,
+        "interaction_groups": 18,
+        "group_profile": "mixed-tool-cycle",
+        "tool_results": [
+          {"tool": "list_files", "count": 4, "chars_each": 16000, "content_profile": "ascii-log", "critical_marker_position": "head"},
+          {"tool": "grep_search", "count": 4, "chars_each": 24000, "content_profile": "python-source", "critical_marker_position": "middle"},
+          {"tool": "read_file", "count": 4, "chars_each": 60000, "content_profile": "python-source", "critical_marker_position": "tail"},
+          {"tool": "run_shell", "count": 4, "chars_each": 50000, "content_profile": "test-failure-stream", "critical_marker_position": "tail"}
+        ],
+        "state_items": {"task_findings": 24, "task_decisions": 6, "tool_entries": 16},
+        "language_mix": ["en", "python", "json", "log"]
+      },
+      "expected": {"tool_compression": true, "fold": false, "state_compact": false, "protected_recent_groups": 3},
+      "assertions": [
+        {"type": "every_tool_observation_within_own_cap"},
+        {"type": "all_artifact_refs_resolve"},
+        {"type": "all_groups_protocol_complete"}
+      ]
+    },
+    {
+      "id": "offline-pre-fold-07",
+      "bucket": "long-trajectory",
+      "description": "Trajectory just below the 70% fold trigger.",
+      "generator": {
+        "seed": 9007,
+        "logical_window_tokens": 32000,
+        "target_usage_ratio": 0.695,
+        "interaction_groups": 20,
+        "group_profile": "mixed-tool-cycle",
+        "tool_results": [{"tool": "run_shell", "count": 18, "chars_each": 12000, "content_profile": "test-failure-stream", "critical_marker_position": "tail"}],
+        "state_items": {"task_findings": 30, "task_decisions": 8, "tool_entries": 18},
+        "language_mix": ["en", "python", "log"]
+      },
+      "expected": {"tool_compression": true, "fold": false, "state_compact": false, "protected_recent_groups": 3},
+      "assertions": [
+        {"type": "usage_ratio_below_trigger"},
+        {"type": "fold_event_count", "value": 0},
+        {"type": "trajectory_group_count_unchanged"}
+      ]
+    },
+    {
+      "id": "offline-fold-boundary-08",
+      "bucket": "long-trajectory",
+      "description": "One appended complete group moves the prompt across the 70% trigger.",
+      "generator": {
+        "seed": 9008,
+        "logical_window_tokens": 32000,
+        "target_usage_ratio_before_last_group": 0.695,
+        "interaction_groups": 21,
+        "group_profile": "mixed-tool-cycle",
+        "last_group": {"tool": "run_shell", "chars": 18000, "content_profile": "test-failure-stream", "status": "complete", "protected": false},
+        "tool_results": [{"tool": "run_shell", "count": 19, "chars_each": 12000, "content_profile": "test-failure-stream", "critical_marker_position": "tail"}],
+        "state_items": {"task_findings": 32, "task_decisions": 8, "tool_entries": 20},
+        "language_mix": ["en", "python", "log"]
+      },
+      "expected": {"tool_compression": true, "fold": true, "state_compact": false, "protected_recent_groups": 3},
+      "assertions": [
+        {"type": "usage_ratio_crosses_trigger_once"},
+        {"type": "fold_event_count", "value": 1},
+        {"type": "epoch_increment", "value": 1},
+        {"type": "folded_groups_archived"}
+      ]
+    },
+    {
+      "id": "offline-protected-groups-09",
+      "bucket": "protocol-edge",
+      "description": "Fold pressure with current user turn, recent groups and parallel tool batches protected.",
+      "generator": {
+        "seed": 9009,
+        "logical_window_tokens": 30000,
+        "target_usage_ratio": 0.76,
+        "interaction_groups": 24,
+        "group_profile": "parallel-tool-batch",
+        "parallel_calls_per_group": [2, 4],
+        "current_user_group": 24,
+        "protected_group_ids": [22, 23, 24],
+        "tool_results": [{"tool": "grep_search", "count": 60, "chars_each": 10000, "content_profile": "python-source", "critical_marker_position": "middle"}],
+        "state_items": {"task_findings": 36, "task_decisions": 10, "tool_entries": 24},
+        "language_mix": ["en", "python"]
+      },
+      "expected": {"tool_compression": true, "fold": true, "state_compact": false, "protected_recent_groups": 3},
+      "assertions": [
+        {"type": "protected_groups_not_folded"},
+        {"type": "parallel_call_results_remain_atomic"},
+        {"type": "no_orphan_tool_results"},
+        {"type": "current_user_turn_preserved"}
+      ]
+    },
+    {
+      "id": "offline-multi-fold-10",
+      "bucket": "long-trajectory",
+      "description": "Three epochs with enough complete groups to trigger multiple folds.",
+      "generator": {
+        "seed": 9010,
+        "logical_window_tokens": 36000,
+        "epochs_to_generate": 3,
+        "interaction_groups_per_epoch": 24,
+        "group_profile": "mixed-tool-cycle",
+        "tool_results": [
+          {"tool": "read_file", "count": 24, "chars_each": 40000, "content_profile": "python-source", "critical_marker_position": "middle"},
+          {"tool": "run_shell", "count": 24, "chars_each": 30000, "content_profile": "test-failure-stream", "critical_marker_position": "tail"}
+        ],
+        "state_items_per_epoch": {"task_findings": 20, "task_decisions": 5, "tool_entries": 16},
+        "language_mix": ["en", "python", "json", "log"]
+      },
+      "expected": {"tool_compression": true, "fold": true, "minimum_fold_count": 2, "state_compact": false, "protected_recent_groups": 3},
+      "assertions": [
+        {"type": "fold_event_count_at_least", "value": 2},
+        {"type": "epoch_ids_strictly_increase"},
+        {"type": "archive_contains_all_complete_groups"},
+        {"type": "request_anchors_monotonic"}
+      ]
+    },
+    {
+      "id": "offline-state-compact-11",
+      "bucket": "state-churn",
+      "description": "Large Task/Tool State with stale-first eviction after Fold merge.",
+      "generator": {
+        "seed": 9011,
+        "logical_window_tokens": 32000,
+        "interaction_groups": 28,
+        "group_profile": "state-update-cycle",
+        "tool_results": [{"tool": "read_file", "count": 26, "chars_each": 16000, "content_profile": "python-source", "critical_marker_position": "middle"}],
+        "state_items": {"task_findings": 240, "task_findings_stale": 160, "task_decisions": 80, "tool_entries": 220, "must_keep_ids": ["f-current-contract", "d-public-api", "t-active"]},
+        "state_budgets": {"task_tokens": 8000, "tool_tokens": 8000},
+        "language_mix": ["en", "python", "json"]
+      },
+      "expected": {"tool_compression": true, "fold": true, "state_compact": true, "protected_recent_groups": 3},
+      "assertions": [
+        {"type": "state_within_budget_after_compact"},
+        {"type": "stale_evicted_before_valid"},
+        {"type": "ids_preserved", "ids": ["f-current-contract", "d-public-api", "t-active"]},
+        {"type": "overflow_artifact_resolves"}
+      ]
+    },
+    {
+      "id": "offline-unicode-12",
+      "bucket": "multilingual-code",
+      "description": "Chinese, Unicode paths, JSON and code mix used to expose estimator calibration error.",
+      "generator": {
+        "seed": 9012,
+        "logical_window_tokens": 40000,
+        "interaction_groups": 26,
+        "group_profile": "mixed-tool-cycle",
+        "tool_results": [
+          {"tool": "read_file", "count": 10, "chars_each": 30000, "content_profile": "unicode-mixed", "critical_marker_position": "middle"},
+          {"tool": "run_shell", "count": 10, "chars_each": 18000, "content_profile": "json-records", "critical_marker_position": "tail"}
+        ],
+        "state_items": {"task_findings": 60, "task_decisions": 14, "tool_entries": 28},
+        "language_mix": ["zh-CN", "ja-JP", "en", "python", "json", "unicode-paths"]
+      },
+      "expected": {"tool_compression": true, "fold": true, "state_compact": false, "protected_recent_groups": 3, "calibration_slice": "multilingual"},
+      "assertions": [
+        {"type": "unicode_roundtrip"},
+        {"type": "canonical_json_stable"},
+        {"type": "critical_marker_recoverable"},
+        {"type": "reported_and_estimated_tokens_kept_separate"}
+      ]
+    }
+  ]
+}

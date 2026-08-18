@@ -7,6 +7,7 @@ from typing import Any
 from .artifact_store import ArtifactStore
 from .checkpoint import CheckpointManager
 from .event_log import EventLog
+from .event_replay import EventReplayer
 from .models import (
     StructuredSession,
     TaskState,
@@ -135,7 +136,7 @@ class StructuredSessionStore:
             event_log=event_log,
             artifact_store=artifact_store,
             workspace_fingerprint=fingerprint,
-            token_counter=TokenCounter(),
+            token_counter=TokenCounter.from_dict(session.metrics.get("token_calibration")),
             trajectory_archive=TrajectoryArchive(directory / "trajectory-archive.jsonl", fsync=self.fsync),
             config=context_config,
             prefix_hash=str(session.config_fingerprint.get("prefix_hash", "")),
@@ -144,7 +145,9 @@ class StructuredSessionStore:
         )
         suffix = event_log.read_since(int(manifest.log_anchor.get("last_event_seq", 0)))
         if suffix:
-            context.session.status = "recovery_pending"
+            replay_result = EventReplayer().replay(context, suffix)
+            context.replay_result = replay_result  # type: ignore[attr-defined]
+            context.event_log  # suffix is already present in the authoritative log
         return context
 
     def save_context(
@@ -155,7 +158,18 @@ class StructuredSessionStore:
     ) -> dict[str, Any]:
         context.finalize()
         directory = self.session_dir(context.session.session_id)
+        # Capacity control is a safe-cut-point invariant: run it before every
+        # snapshot, not only after a fold.
+        compact_result = context._state_compactor.compact(
+            context.task_state,
+            context.tool_state,
+            artifact_store=context.artifact_store,
+        )
+        if compact_result.evicted_task_items or compact_result.evicted_tool_items:
+            context.event_log.append("state_compact", compact_result.to_dict())
         expected = context.workspace_expected()
+        # Persist token calibration alongside the session snapshot.
+        context.session.metrics["token_calibration"] = context.token_counter.calibration.to_dict()
         drift = context.workspace_fingerprint.diff(expected)
         recovery = {
             "resumable": True,

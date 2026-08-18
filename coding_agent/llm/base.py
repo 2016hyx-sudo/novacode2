@@ -90,6 +90,9 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     stop_reason: str | None = None
     usage: dict[str, Any] = field(default_factory=dict)
+    # Populated by AgentLoop/FoldEngine measurement wrappers, not providers.
+    request_id: str | None = None
+    normalized_usage: dict[str, Any] = field(default_factory=dict)
 
 
 class LLMError(Exception):

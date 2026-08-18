@@ -1,0 +1,343 @@
+{
+  "schema_version": "1.0",
+  "suite": "core-30",
+  "scenarios": [
+    {
+      "id": "short-01",
+      "bucket": "short-control",
+      "title": "Fix inclusive range total",
+      "task": "修复 totals.py 中 inclusive_total 的边界错误，不改变公开函数签名，并运行完整测试。",
+      "fixture": {"template": "python-micro-package", "seed": 101, "parameters": {"module_count": 2, "test_count": 6, "defect": "inclusive-range-off-by-one", "padding_lines": 0}},
+      "pressure": {"expected_steps": [2, 5], "raw_tool_output_chars": [0, 8000], "expect_fold": false, "expect_state_compact": false},
+      "limits": {"max_steps": 8, "max_tool_calls": 16, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "file_contains", "path": "totals.py", "text": "range(start, end + 1)"}]},
+      "tags": ["control", "localized-fix"]
+    },
+    {
+      "id": "short-02",
+      "bucket": "short-control",
+      "title": "Validate retry configuration",
+      "task": "让 parse_retry_count 对负数和非整数字符串返回默认值 3，同时保留合法的 0，并补充或修复测试。",
+      "fixture": {"template": "python-micro-package", "seed": 102, "parameters": {"module_count": 3, "test_count": 8, "defect": "retry-config-validation", "padding_lines": 20}},
+      "pressure": {"expected_steps": [2, 6], "raw_tool_output_chars": [0, 10000], "expect_fold": false, "expect_state_compact": false},
+      "limits": {"max_steps": 10, "max_tool_calls": 20, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "python_expression", "expression": "parse_retry_count('0') == 0 and parse_retry_count('-1') == 3"}]},
+      "tags": ["control", "validation"]
+    },
+    {
+      "id": "short-03",
+      "bucket": "short-control",
+      "title": "Repair DOM restart state",
+      "task": "修复重新开始按钮没有清空计数器和状态提示的问题；不要引入依赖，并用现有 Node 验证脚本检查。",
+      "fixture": {"template": "javascript-browser-app", "seed": 103, "parameters": {"component_count": 2, "event_count": 4, "defect": "restart-state-not-reset", "padding_lines": 0}},
+      "pressure": {"expected_steps": [2, 6], "raw_tool_output_chars": [0, 12000], "expect_fold": false, "expect_state_compact": false},
+      "limits": {"max_steps": 10, "max_tool_calls": 20, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "node tests/check.js"}, {"type": "file_contains", "path": "app.js", "text": "attempts = 0"}]},
+      "tags": ["control", "javascript"]
+    },
+    {
+      "id": "short-04",
+      "bucket": "short-control",
+      "title": "Preserve stable JSON ordering",
+      "task": "修复 serializer.py，使输出 JSON 在相同输入下保持稳定键顺序并以换行结尾，运行测试验证。",
+      "fixture": {"template": "python-micro-package", "seed": 104, "parameters": {"module_count": 2, "test_count": 7, "defect": "unstable-json-order", "padding_lines": 10}},
+      "pressure": {"expected_steps": [2, 5], "raw_tool_output_chars": [0, 8000], "expect_fold": false, "expect_state_compact": false},
+      "limits": {"max_steps": 8, "max_tool_calls": 16, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "file_contains", "path": "serializer.py", "text": "sort_keys=True"}]},
+      "tags": ["control", "serialization"]
+    },
+
+    {
+      "id": "tool-output-01",
+      "bucket": "tool-output-heavy",
+      "title": "Diagnose 4K parser log",
+      "task": "根据 tests 和 generated.log 定位时间戳解析失败，修复 parser.py；错误线索位于日志中部，完成后运行测试。",
+      "fixture": {"template": "python-log-pipeline", "seed": 201, "parameters": {"log_chars": 4096, "record_count": 80, "marker_position": "middle", "defect": "timezone-colon"}},
+      "pressure": {"expected_steps": [4, 10], "raw_tool_output_chars": [4096, 16000], "expect_fold": false, "expect_state_compact": false},
+      "limits": {"max_steps": 14, "max_tool_calls": 30, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "fixture_marker_preserved", "marker": "TZ_COLON_CASE"}]},
+      "tags": ["read-file", "4k-output", "artifact"]
+    },
+    {
+      "id": "tool-output-02",
+      "bucket": "tool-output-heavy",
+      "title": "Find failure in 20K test stream",
+      "task": "运行测试并从长输出中找出唯一失败用例，修复 aggregator.py 的分组逻辑，确保全部测试通过。",
+      "fixture": {"template": "python-log-pipeline", "seed": 202, "parameters": {"log_chars": 20000, "record_count": 400, "marker_position": "tail", "defect": "group-boundary-reset"}},
+      "pressure": {"expected_steps": [5, 12], "raw_tool_output_chars": [20000, 60000], "expect_fold": false, "expect_state_compact": false},
+      "limits": {"max_steps": 18, "max_tool_calls": 36, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "file_not_contains", "path": "aggregator.py", "text": "current = {}  # reset inside loop"}]},
+      "tags": ["run-shell", "20k-output", "tail-marker"]
+    },
+    {
+      "id": "tool-output-03",
+      "bucket": "tool-output-heavy",
+      "title": "Recover clue from 100K build output",
+      "task": "分析 build.log 和失败测试。关键模块名只在长输出末尾出现；修复 registry.py 后再次验证，不要删除日志。",
+      "fixture": {"template": "python-log-pipeline", "seed": 203, "parameters": {"log_chars": 100000, "record_count": 1800, "marker_position": "last-2-percent", "defect": "registry-normalization"}},
+      "pressure": {"expected_steps": [6, 14], "raw_tool_output_chars": [100000, 240000], "expect_fold": false, "expect_state_compact": false},
+      "limits": {"max_steps": 20, "max_tool_calls": 42, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "fixture_marker_preserved", "marker": "REGISTRY_CASEFOLD_FAILURE"}, {"type": "artifact_expected", "minimum_count": 1}]},
+      "tags": ["100k-output", "artifact-reread", "head-tail"]
+    },
+    {
+      "id": "tool-output-04",
+      "bucket": "tool-output-heavy",
+      "title": "Patch generated source by symbol",
+      "task": "不要通读整个 generated_handlers.py；定位 handle_invoice_v17，修复空 currency 时的默认值，并运行针对性测试和完整测试。",
+      "fixture": {"template": "python-generated-tree", "seed": 204, "parameters": {"file_count": 8, "lines_per_file": 1800, "duplicate_symbols": 0, "stale_fact_count": 0, "target_symbol": "handle_invoice_v17"}},
+      "pressure": {"expected_steps": [5, 12], "raw_tool_output_chars": [50000, 180000], "expect_fold": false, "expect_state_compact": false},
+      "limits": {"max_steps": 18, "max_tool_calls": 36, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "file_contains", "path": "generated_handlers.py", "text": "currency or 'USD'"}]},
+      "tags": ["large-source", "grep", "targeted-read"]
+    },
+    {
+      "id": "tool-output-05",
+      "bucket": "tool-output-heavy",
+      "title": "Resolve duplicate symbols in large tree",
+      "task": "找出项目中三个 normalize_customer_id 定义，确认实际导入路径，只修复生产使用的实现并补充回归测试。",
+      "fixture": {"template": "python-generated-tree", "seed": 205, "parameters": {"file_count": 120, "lines_per_file": 160, "duplicate_symbols": 3, "stale_fact_count": 0, "target_symbol": "normalize_customer_id"}},
+      "pressure": {"expected_steps": [6, 14], "raw_tool_output_chars": [30000, 140000], "expect_fold": false, "expect_state_compact": false},
+      "limits": {"max_steps": 20, "max_tool_calls": 44, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "changed_files_match", "patterns": ["src/production_ids.py", "tests/test_production_ids.py"]}]},
+      "tags": ["grep-heavy", "large-tree", "decision"]
+    },
+    {
+      "id": "tool-output-06",
+      "bucket": "tool-output-heavy",
+      "title": "Repair malformed record in large JSON",
+      "task": "定位 records.json 中导致汇总错误的记录，修复 loader.py 使其拒绝缺少 kind 的对象并报告记录索引；不要改数据文件。",
+      "fixture": {"template": "mixed-config-repo", "seed": 206, "parameters": {"languages": ["python", "json"], "unicode_paths": false, "json_records": 5000, "defect": "missing-kind-record"}},
+      "pressure": {"expected_steps": [5, 12], "raw_tool_output_chars": [80000, 260000], "expect_fold": false, "expect_state_compact": false},
+      "limits": {"max_steps": 18, "max_tool_calls": 38, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "file_unchanged", "path": "records.json"}, {"type": "file_contains", "path": "loader.py", "text": "record_index"}]},
+      "tags": ["large-json", "middle-marker", "artifact"]
+    },
+
+    {
+      "id": "long-trajectory-01",
+      "bucket": "long-trajectory",
+      "title": "Refactor service boundaries",
+      "task": "把订单校验从 service.py 拆到 domain/validation.py，更新所有调用方和测试，保持公开 API 兼容并完成全量验证。",
+      "fixture": {"template": "python-multimodule-service", "seed": 301, "parameters": {"module_count": 24, "test_count": 60, "dependency_depth": 5, "defect_count": 4}},
+      "pressure": {"expected_steps": [14, 26], "raw_tool_output_chars": [120000, 400000], "expect_fold": true, "expect_state_compact": false},
+      "limits": {"max_steps": 30, "max_tool_calls": 75, "context_window_tokens": 32000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "file_exists", "path": "domain/validation.py"}, {"type": "public_api_unchanged", "module": "service"}]},
+      "tags": ["fold", "multi-module", "compatibility"]
+    },
+    {
+      "id": "long-trajectory-02",
+      "bucket": "long-trajectory",
+      "title": "Implement paginated export",
+      "task": "为 catalog export 增加稳定分页、断点 continuation token 和空页处理；按现有分层实现并通过全部测试。",
+      "fixture": {"template": "python-multimodule-service", "seed": 302, "parameters": {"module_count": 30, "test_count": 72, "dependency_depth": 6, "defect_count": 5}},
+      "pressure": {"expected_steps": [16, 28], "raw_tool_output_chars": [150000, 500000], "expect_fold": true, "expect_state_compact": false},
+      "limits": {"max_steps": 32, "max_tool_calls": 80, "context_window_tokens": 36000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "file_contains", "path": "catalog/export.py", "text": "continuation_token"}, {"type": "fixture_marker_preserved", "marker": "EMPTY_PAGE_MUST_ADVANCE"}]},
+      "tags": ["fold", "feature", "many-groups"]
+    },
+    {
+      "id": "long-trajectory-03",
+      "bucket": "long-trajectory",
+      "title": "Resolve cascading test failures",
+      "task": "按根因而不是逐个跳过测试，修复价格精度变更引起的级联失败；记录兼容性决定并完成全量验证。",
+      "fixture": {"template": "python-multimodule-service", "seed": 303, "parameters": {"module_count": 28, "test_count": 90, "dependency_depth": 7, "defect_count": 6}},
+      "pressure": {"expected_steps": [15, 28], "raw_tool_output_chars": [180000, 650000], "expect_fold": true, "expect_state_compact": false},
+      "limits": {"max_steps": 32, "max_tool_calls": 80, "context_window_tokens": 36000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "forbidden_test_skip_count", "maximum": 0}, {"type": "decimal_precision_equals", "value": "0.01"}]},
+      "tags": ["fold", "test-output", "root-cause"]
+    },
+    {
+      "id": "long-trajectory-04",
+      "bucket": "long-trajectory",
+      "title": "Migrate configuration schema",
+      "task": "将 v1 配置迁移到 v2，同时支持读取旧文件、写出 canonical v2、保留未知扩展字段，并补齐迁移测试。",
+      "fixture": {"template": "mixed-config-repo", "seed": 304, "parameters": {"languages": ["python", "json", "markdown"], "unicode_paths": false, "json_records": 800, "defect": "schema-v1-v2-migration"}},
+      "pressure": {"expected_steps": [14, 26], "raw_tool_output_chars": [100000, 380000], "expect_fold": true, "expect_state_compact": false},
+      "limits": {"max_steps": 30, "max_tool_calls": 72, "context_window_tokens": 32000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "json_schema_version", "path": "tests/golden/v2.json", "value": 2}, {"type": "unknown_fields_preserved", "path": "tests/golden/v2.json"}]},
+      "tags": ["fold", "migration", "json"]
+    },
+    {
+      "id": "long-trajectory-05",
+      "bucket": "long-trajectory",
+      "title": "Production-scale no-loss trajectory",
+      "task": "完成跨 package 的事件重放修复，逐层验证序列化、恢复和最终集成测试；不得删除失败事件或降低断言。",
+      "fixture": {"template": "python-monorepo", "seed": 305, "parameters": {"package_count": 8, "files_per_package": 18, "failure_packages": 4, "large_outputs": true}},
+      "pressure": {"expected_steps": [20, 30], "raw_tool_output_chars": [500000, 1200000], "expect_fold": true, "expect_state_compact": false},
+      "limits": {"max_steps": 34, "max_tool_calls": 88, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s packages -p 'test_*.py' -q"}, {"type": "event_loss_count", "value": 0}, {"type": "forbidden_assertion_deletion", "value": true}]},
+      "tags": ["production-window", "fold", "large-run"]
+    },
+
+    {
+      "id": "state-churn-01",
+      "bucket": "state-churn",
+      "title": "Invalidate stale file findings",
+      "task": "修复配置加载顺序，并在修改后重新检查所有依赖该配置的模块；最终测试必须通过。",
+      "fixture": {"template": "python-generated-tree", "seed": 401, "parameters": {"file_count": 70, "lines_per_file": 220, "duplicate_symbols": 0, "stale_fact_count": 90, "target_symbol": "load_layered_config"}},
+      "pressure": {"expected_steps": [10, 22], "raw_tool_output_chars": [80000, 300000], "expect_fold": true, "expect_state_compact": true},
+      "limits": {"max_steps": 28, "max_tool_calls": 70, "context_window_tokens": 30000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "stale_finding_revalidated", "minimum_count": 5}]},
+      "tags": ["state-compact", "stale-findings", "reread"]
+    },
+    {
+      "id": "state-churn-02",
+      "bucket": "state-churn",
+      "title": "Rename API across generated tree",
+      "task": "将内部 fetch_user_record 重命名为 load_user_record，更新生产调用和测试；公开 compatibility alias 必须保留。",
+      "fixture": {"template": "python-generated-tree", "seed": 402, "parameters": {"file_count": 110, "lines_per_file": 180, "duplicate_symbols": 7, "stale_fact_count": 120, "target_symbol": "fetch_user_record"}},
+      "pressure": {"expected_steps": [12, 24], "raw_tool_output_chars": [140000, 460000], "expect_fold": true, "expect_state_compact": true},
+      "limits": {"max_steps": 30, "max_tool_calls": 78, "context_window_tokens": 32000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "symbol_reference_count", "symbol": "fetch_user_record", "expected_scope": "compatibility-alias-only"}]},
+      "tags": ["state-compact", "rename", "large-tree"]
+    },
+    {
+      "id": "state-churn-03",
+      "bucket": "state-churn",
+      "title": "Consolidate conflicting decisions",
+      "task": "统一三种空值处理策略为 domain policy，移除重复分支，更新 ADR 摘要和测试，保持外部响应格式不变。",
+      "fixture": {"template": "python-multimodule-service", "seed": 403, "parameters": {"module_count": 36, "test_count": 80, "dependency_depth": 6, "defect_count": 8, "decision_records": 140}},
+      "pressure": {"expected_steps": [14, 26], "raw_tool_output_chars": [120000, 420000], "expect_fold": true, "expect_state_compact": true},
+      "limits": {"max_steps": 32, "max_tool_calls": 80, "context_window_tokens": 34000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "file_contains", "path": "docs/adr-null-policy.md", "text": "Canonical policy"}, {"type": "response_golden_unchanged", "path": "tests/golden/responses.json"}]},
+      "tags": ["state-compact", "decisions", "dedupe"]
+    },
+    {
+      "id": "state-churn-04",
+      "bucket": "state-churn",
+      "title": "Compact verification history",
+      "task": "修复 flaky scheduler 的确定性排序问题；需要多轮针对性验证，但最终状态只应保留最新有效结论。",
+      "fixture": {"template": "python-generated-tree", "seed": 404, "parameters": {"file_count": 55, "lines_per_file": 260, "duplicate_symbols": 2, "stale_fact_count": 160, "target_symbol": "stable_schedule"}},
+      "pressure": {"expected_steps": [12, 26], "raw_tool_output_chars": [160000, 520000], "expect_fold": true, "expect_state_compact": true},
+      "limits": {"max_steps": 32, "max_tool_calls": 80, "context_window_tokens": 32000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "command_exit_zero", "command": "python tests/repeat_scheduler.py --runs 50"}, {"type": "latest_verification_is_passing", "value": true}]},
+      "tags": ["state-compact", "verification-history", "flaky"]
+    },
+
+    {
+      "id": "protocol-edge-01",
+      "bucket": "protocol-edge",
+      "title": "Parallel inspection batch",
+      "task": "并行检查 parser、schema 和失败测试，修复字段别名映射；所有工具调用结果必须保持完整配对。",
+      "fixture": {"template": "python-micro-package", "seed": 501, "parameters": {"module_count": 8, "test_count": 18, "defect": "field-alias-map", "padding_lines": 100}},
+      "pressure": {"expected_steps": [5, 12], "raw_tool_output_chars": [20000, 80000], "expect_fold": false, "expect_state_compact": false, "parallel_tool_calls": true},
+      "limits": {"max_steps": 18, "max_tool_calls": 40, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "protocol_errors_equal", "value": 0}, {"type": "tool_call_results_complete", "value": true}]},
+      "tags": ["parallel-tools", "interaction-group"]
+    },
+    {
+      "id": "protocol-edge-02",
+      "bucket": "protocol-edge",
+      "title": "Recover from failed shell command",
+      "task": "测试说明中故意包含一个不存在的命令；识别该失败，改用仓库提供的标准库验证入口并修复 decoder.py。",
+      "fixture": {"template": "python-micro-package", "seed": 502, "parameters": {"module_count": 5, "test_count": 16, "defect": "decoder-empty-frame", "padding_lines": 40, "misleading_command": "pytest"}},
+      "pressure": {"expected_steps": [5, 14], "raw_tool_output_chars": [10000, 50000], "expect_fold": false, "expect_state_compact": false, "expected_tool_failures": 1},
+      "limits": {"max_steps": 20, "max_tool_calls": 42, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "observed_tool_failure_count", "minimum": 1}, {"type": "status_equals", "value": "completed"}]},
+      "tags": ["tool-failure", "recovery"]
+    },
+    {
+      "id": "protocol-edge-03",
+      "bucket": "protocol-edge",
+      "title": "Validation correction loop",
+      "task": "修复 writer.py 的原子写入问题。第一次局部测试不足以完成任务，必须执行完整验证后才能结束。",
+      "fixture": {"template": "python-micro-package", "seed": 503, "parameters": {"module_count": 6, "test_count": 24, "defect": "non-atomic-write", "padding_lines": 60}},
+      "pressure": {"expected_steps": [6, 16], "raw_tool_output_chars": [20000, 90000], "expect_fold": false, "expect_state_compact": false, "expect_validation_correction": true},
+      "limits": {"max_steps": 22, "max_tool_calls": 48, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "validation_passed_after_last_edit", "value": true}, {"type": "protocol_errors_equal", "value": 0}]},
+      "tags": ["correction", "validation"]
+    },
+    {
+      "id": "protocol-edge-04",
+      "bucket": "protocol-edge",
+      "title": "Provider retry without duplicate group",
+      "task": "修复 cache_key 的 canonicalization，并完成测试；fixture provider 在第二次模型请求前注入一次可重试错误。",
+      "fixture": {"template": "python-micro-package", "seed": 504, "parameters": {"module_count": 5, "test_count": 20, "defect": "cache-key-order", "padding_lines": 80, "provider_fault": "retryable-on-request-2"}},
+      "pressure": {"expected_steps": [5, 14], "raw_tool_output_chars": [15000, 70000], "expect_fold": false, "expect_state_compact": false, "expected_provider_retries": 1},
+      "limits": {"max_steps": 20, "max_tool_calls": 42, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "provider_retry_count", "value": 1}, {"type": "duplicate_interaction_groups", "value": 0}]},
+      "tags": ["provider-retry", "request-identity"]
+    },
+
+    {
+      "id": "resume-01",
+      "bucket": "resume-recovery",
+      "title": "Resume after unrelated low drift",
+      "task": "从 checkpoint 继续实现 formatter 修复。恢复前会新增 unrelated.txt；确认其不影响当前任务并继续完成验证。",
+      "fixture": {"template": "git-recovery-repo", "seed": 601, "parameters": {"drift": "LOW", "impacted_paths": ["unrelated.txt"], "branch_change": false, "expected_action": "RESUME"}},
+      "pressure": {"expected_steps": [6, 16], "raw_tool_output_chars": [20000, 90000], "expect_fold": false, "expect_state_compact": false, "resume_boundary": true},
+      "limits": {"max_steps": 22, "max_tool_calls": 48, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "recovery_action_equals", "value": "RESUME"}, {"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "file_unchanged", "path": "unrelated.txt"}]},
+      "tags": ["checkpoint", "low-drift", "resume"]
+    },
+    {
+      "id": "resume-02",
+      "bucket": "resume-recovery",
+      "title": "Replan after impacted high drift",
+      "task": "从 checkpoint 恢复订单校验任务。目标模块已被外部修改；重新读取受影响文件、更新计划并安全完成修复。",
+      "fixture": {"template": "git-recovery-repo", "seed": 602, "parameters": {"drift": "HIGH", "impacted_paths": ["src/orders.py", "tests/test_orders.py"], "branch_change": false, "expected_action": "REPLAN"}},
+      "pressure": {"expected_steps": [8, 20], "raw_tool_output_chars": [30000, 130000], "expect_fold": false, "expect_state_compact": false, "resume_boundary": true},
+      "limits": {"max_steps": 26, "max_tool_calls": 58, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "recovery_action_equals", "value": "REPLAN"}, {"type": "impacted_paths_reread", "paths": ["src/orders.py", "tests/test_orders.py"]}, {"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}]},
+      "tags": ["checkpoint", "high-drift", "replan"]
+    },
+    {
+      "id": "resume-03",
+      "bucket": "resume-recovery",
+      "title": "Block structural branch drift",
+      "task": "尝试从 checkpoint 恢复任务；恢复前 git branch 和 HEAD 均发生变化，系统应在任何文件修改或模型请求前阻止继续。",
+      "fixture": {"template": "git-recovery-repo", "seed": 603, "parameters": {"drift": "STRUCTURAL", "impacted_paths": [], "branch_change": true, "expected_action": "BLOCKED"}},
+      "pressure": {"expected_steps": [0, 0], "raw_tool_output_chars": [0, 0], "expect_fold": false, "expect_state_compact": false, "resume_boundary": true},
+      "limits": {"max_steps": 10, "max_tool_calls": 10, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "recovery_action_equals", "value": "BLOCKED"}, {"type": "model_request_count", "value": 0}, {"type": "workspace_change_count", "value": 0}]},
+      "tags": ["checkpoint", "structural-drift", "blocked"]
+    },
+
+    {
+      "id": "multilingual-01",
+      "bucket": "multilingual-code",
+      "title": "Repair Chinese configuration aliases",
+      "task": "修复配置加载器，使“重试次数”和 retry_count 作为同一字段处理；错误信息保留中文路径和键名，并运行测试。",
+      "fixture": {"template": "mixed-config-repo", "seed": 701, "parameters": {"languages": ["python", "json", "zh-CN"], "unicode_paths": true, "json_records": 1200, "defect": "chinese-key-alias"}},
+      "pressure": {"expected_steps": [6, 16], "raw_tool_output_chars": [60000, 220000], "expect_fold": false, "expect_state_compact": false, "language_mix": ["zh-CN", "python", "json"]},
+      "limits": {"max_steps": 22, "max_tool_calls": 50, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "unicode_error_message_preserved", "text": "配置/生产环境.json: 重试次数"}]},
+      "tags": ["chinese", "unicode-path", "tokenizer"]
+    },
+    {
+      "id": "multilingual-02",
+      "bucket": "multilingual-code",
+      "title": "Canonicalize Unicode identifiers",
+      "task": "修复用户标识符的 Unicode normalization，使 NFC/NFD 输入得到相同 key，同时保持原始显示名称。",
+      "fixture": {"template": "mixed-config-repo", "seed": 702, "parameters": {"languages": ["python", "json", "markdown", "ja-JP", "zh-CN"], "unicode_paths": true, "json_records": 1800, "defect": "unicode-normalization"}},
+      "pressure": {"expected_steps": [7, 18], "raw_tool_output_chars": [80000, 280000], "expect_fold": false, "expect_state_compact": false, "language_mix": ["zh-CN", "ja-JP", "unicode", "python"]},
+      "limits": {"max_steps": 24, "max_tool_calls": 54, "context_window_tokens": 256000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s tests -q"}, {"type": "normalization_form", "value": "NFC"}, {"type": "display_name_roundtrip", "value": true}]},
+      "tags": ["unicode", "normalization", "tokenizer"]
+    },
+
+    {
+      "id": "subagent-01",
+      "bucket": "subagent-fold-overhead",
+      "title": "Delegate monorepo failure analysis",
+      "task": "定位跨 package 的序列化失败。允许委派只读调查，但主 Agent 必须整合证据、实施最小修复并完成全量测试。",
+      "fixture": {"template": "python-monorepo", "seed": 801, "parameters": {"package_count": 6, "files_per_package": 16, "failure_packages": 3, "large_outputs": true}},
+      "pressure": {"expected_steps": [12, 26], "raw_tool_output_chars": [180000, 620000], "expect_fold": true, "expect_state_compact": false, "expected_subagents": [1, 2]},
+      "limits": {"max_steps": 32, "max_tool_calls": 80, "max_subagents": 2, "context_window_tokens": 40000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s packages -p 'test_*.py' -q"}, {"type": "subagent_report_is_structured", "value": true}, {"type": "main_agent_verified", "value": true}]},
+      "tags": ["subagent", "fold", "net-crr"]
+    },
+    {
+      "id": "subagent-02",
+      "bucket": "subagent-fold-overhead",
+      "title": "Fold fallback with delegated evidence",
+      "task": "调查并修复两个 package 间的 cache invalidation 缺陷。Fold provider 第一次调用会失败，系统必须 fallback 且保留 subagent 证据。",
+      "fixture": {"template": "python-monorepo", "seed": 802, "parameters": {"package_count": 7, "files_per_package": 18, "failure_packages": 2, "large_outputs": true, "fold_fault": "fail-first-call"}},
+      "pressure": {"expected_steps": [14, 28], "raw_tool_output_chars": [220000, 760000], "expect_fold": true, "expect_state_compact": false, "expected_subagents": [1, 2], "expect_fold_fallback": true},
+      "limits": {"max_steps": 34, "max_tool_calls": 86, "max_subagents": 2, "context_window_tokens": 40000},
+      "oracle": {"checks": [{"type": "command_exit_zero", "command": "python -m unittest discover -s packages -p 'test_*.py' -q"}, {"type": "fold_fallback_count", "minimum": 1}, {"type": "subagent_evidence_preserved", "value": true}, {"type": "protocol_errors_equal", "value": 0}]},
+      "tags": ["subagent", "fold-fallback", "net-crr"]
+    }
+  ]
+}

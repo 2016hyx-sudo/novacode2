@@ -30,7 +30,11 @@ Rules:
 - Work only inside the workspace.
 - Prefer small tool calls and verify any change you make.
 - Do not ask questions; make reasonable assumptions and report them.
-- Your final message is returned to the main agent, so make it self-contained."""
+- Your final message is returned to the main agent, so make it self-contained.
+- End with one JSON object:
+  {"summary": "...", "findings": [{"fact": "...", "evidence": ["..."]}],
+   "evidence": [{"type": "file|command", "path": "...", "value": "..."}],
+   "blockers": ["..."], "next_action": "..."}"""
 
 
 def _utcnow() -> str:

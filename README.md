@@ -142,8 +142,38 @@ legacy session:
 python main.py "now also add /ready" --structured-context --session <session_id>
 ```
 
+Structured sessions also support crash replay of un-checkpointed events,
+LLM-assisted trajectory folding with deterministic fallback, state capacity
+control, workspace-drift RESUME / REPLAN / BLOCKED recovery, session locks and
+legacy-session migration:
+
+```bash
+python main.py --structured-context --migrate-legacy-session <session_id>
+```
+
 Design baseline: `coding_agent_context_management_v3.md`; detailed schema and
-implementation breakdown: `coding_agent_context_management_v3_schema.md`.
+implementation breakdown: `coding_agent_context_management_v3_schema.md`;
+automated measurement design for Context Reduction Ratio and p50/p95 input
+tokens: `structured_context_evaluation_plan.md`. The versioned evaluation task
+data lives under `evals/structured_context/data/` (30 full-run scenarios and 12
+offline replay recipes). Run deterministic replay with no model/network call:
+
+```bash
+python -m evals.structured_context offline --output .eval-results/offline
+```
+
+The isolated full-run framework requires an explicitly injected provider. Its
+built-in end-to-end smoke path is also offline:
+
+```bash
+python -m evals.structured_context run --scripted --scenario short-01 \
+  --variant raw_full --variant structured --output .eval-results/scripted
+```
+
+The CLI never constructs a live provider; nightly callers inject one through
+`ContextEvaluationRunner`, so evaluation cannot silently make paid API calls.
+Generated fixtures are trusted local test code: workspace copying, command
+allowlists and hashes are regression isolation, not a hostile-code OS sandbox.
 
 ## Runtime loop
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm.base import Message, ToolSchema
+from ..llm.usage import normalize_usage
 
 
 @dataclass
@@ -36,11 +37,20 @@ class Calibration:
             "coefficient": self.coefficient,
             "samples": len(self.window),
             "max_window": self.max_window,
+            "window": [[float(estimate), float(ratio)] for estimate, ratio in self.window],
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Calibration:
-        return cls(coefficient=float(data.get("coefficient", 1.0)))
+        data = data or {}
+        calibration = cls(
+            coefficient=float(data.get("coefficient", 1.0)),
+            max_window=int(data.get("max_window", 8)),
+        )
+        for pair in data.get("window") or []:
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                calibration.window.append((float(pair[0]), float(pair[1])))
+        return calibration
 
 
 class TokenCounter:
@@ -90,13 +100,22 @@ class TokenCounter:
         raw = self.estimate_text(system_text) + self.estimate_tools(tools) + self.estimate_messages(messages)
         return max(1, int(raw * self.calibration.coefficient))
 
+    def to_dict(self) -> dict[str, Any]:
+        return {"calibration": self.calibration.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> TokenCounter:
+        data = data or {}
+        return cls(calibration=Calibration.from_dict(data.get("calibration") or data))
+
     def record_usage(self, estimate: int, usage: TokenUsage | dict[str, Any]) -> None:
         if isinstance(usage, dict):
+            normalized = normalize_usage(usage)
             usage = TokenUsage(
-                prompt_tokens=int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+                prompt_tokens=int(normalized["logical_input_tokens"]),
                 cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
                 cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
-                output_tokens=int(usage.get("output_tokens") or 0),
+                output_tokens=int(normalized["output_tokens"]),
             )
         self.calibration.record(estimate, usage)
 
