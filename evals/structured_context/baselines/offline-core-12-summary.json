@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "dataset_version": "2026-08-18.1",
+  "mode": "offline",
+  "sample": {
+    "tasks": 12,
+    "main_requests": 238,
+    "fold_requests": 36
+  },
+  "context": {
+    "crr_weighted": 0.882417057278708,
+    "net_crr": 0.8624528617397719,
+    "tool_reduction": 0.6779190009671883,
+    "fold_incremental": 0.6349274155433389
+  },
+  "input_tokens": {
+    "structured": {
+      "p50": 16199,
+      "p95": 25163,
+      "max": 32429,
+      "count": 238
+    },
+    "raw_full": {
+      "p50": 75291,
+      "p95": 421209,
+      "max": 421374,
+      "count": 238
+    }
+  },
+  "metadata": {
+    "baseline_type": "deterministic-synthetic-replay",
+    "token_source": "estimated",
+    "live_provider_baseline": false
+  }
+}

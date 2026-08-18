@@ -5,12 +5,19 @@ back, validate completion, and retry/correct within configured budgets.
 """
 from __future__ import annotations
 
+import copy
 import time
 from dataclasses import dataclass
 from typing import Literal
 
 from .context.manager import ContextManager
 from .llm.base import LLMError, LLMProvider, LLMResponse, ToolCall
+from .llm.usage import (
+    MEASUREMENT_SCHEMA_VERSION,
+    new_request_id,
+    normalize_usage,
+    request_payload_hash,
+)
 from .runtime.planner import Planner
 from .runtime.trace import TraceWriter
 from .runtime.validator import ToolUseRecord, ValidationResult, Validator
@@ -72,7 +79,7 @@ class AgentLoop:
                 self._emit("step_start", step=step)
 
                 try:
-                    response = self._chat_with_retry()
+                    response = self._chat_with_retry(step=step)
                 except LLMError as exc:
                     self._emit("error", error=str(exc), retryable=exc.retryable, step=step)
                     return AgentRunResult(
@@ -91,6 +98,8 @@ class AgentLoop:
                     tool_calls=[call.name for call in response.tool_calls],
                     stop_reason=response.stop_reason,
                     usage=response.usage,
+                    normalized_usage=response.normalized_usage,
+                    request_id=response.request_id,
                 )
                 record_usage = getattr(self.context, "record_usage", None)
                 if record_usage is not None:
@@ -211,28 +220,153 @@ class AgentLoop:
                 tool_calls_used=tool_calls_used,
             )
 
-    def _chat_with_retry(self) -> LLMResponse:
-        # Structured contexts may fold long trajectories before the first call.
-        prepare_for_chat = getattr(self.context, "prepare_for_chat", None)
-        if prepare_for_chat is not None:
-            prepare_for_chat()
+    def _chat_with_retry(self, *, step: int) -> LLMResponse:
+        # Allocate the first main request ID before prompt preparation so any
+        # Fold calls triggered during preparation can point back to it.
+        request_group_id = new_request_id()
+        snapshot_builder = getattr(self.context, "snapshot_for_request", None)
+        snapshot_metadata: dict[str, object] = {}
+        if callable(snapshot_builder):
+            snapshot = snapshot_builder(request_id=request_group_id, step=step)
+            raw_messages = snapshot.get("messages", ())
+            snapshot_metadata = dict(snapshot.get("metadata") or {})
+        else:
+            # Legacy contexts have no folding preparation step.
+            prepare_for_chat = getattr(self.context, "prepare_for_chat", None)
+            if callable(prepare_for_chat):
+                prepare_for_chat()
+            raw_messages = self.context.messages
+
+        # The provider receives this one deep-copied snapshot on every retry;
+        # later context mutation or property access cannot change the payload.
+        messages = tuple(copy.deepcopy(list(raw_messages)))
+        tool_schemas = tuple(copy.deepcopy(self.tools.schemas()))
+        payload_hash = request_payload_hash(messages, tool_schemas)
+        tool_names = [tool.name for tool in tool_schemas]
+        provider_config = getattr(self.llm, "config", None)
+        provider_name = str(getattr(provider_config, "provider", "") or "")
+        model = str(getattr(provider_config, "model", "") or "")
         attempts = self.max_llm_retries + 1
         for attempt in range(attempts):
+            request_id = request_group_id if attempt == 0 else new_request_id()
+            prepared = {
+                "measurement_schema_version": MEASUREMENT_SCHEMA_VERSION,
+                "request_id": request_id,
+                "request_group_id": request_group_id,
+                "parent_request_id": None,
+                "agent_role": self._agent_role(),
+                "step": step,
+                "attempt": attempt + 1,
+                "message_count": len(messages),
+                "tool_count": len(tool_schemas),
+                "tools": tool_names,
+                "payload_hash": payload_hash,
+                "provider": provider_name,
+                "model": model,
+                "event_seq_anchor": None,
+                "epoch_id": None,
+                "layers_estimated": None,
+                **snapshot_metadata,
+            }
+            self._emit("llm_request_prepared", **prepared)
             self._emit(
                 "llm_request",
+                request_id=request_id,
+                request_group_id=request_group_id,
+                agent_role=self._agent_role(),
+                step=step,
                 attempt=attempt + 1,
-                message_count=len(self.context.messages),
-                tools=self.tools.names(),
+                message_count=len(messages),
+                tools=tool_names,
+                payload_hash=payload_hash,
             )
+            attempt_messages = tuple(copy.deepcopy(list(messages)))
+            attempt_tools = tuple(copy.deepcopy(list(tool_schemas)))
+            started = time.monotonic()
             try:
-                return self.llm.chat(self.context.messages, self.tools.schemas())
+                response = self.llm.chat(attempt_messages, attempt_tools)
             except LLMError as exc:
+                self._emit(
+                    "llm_request_finished",
+                    measurement_schema_version=MEASUREMENT_SCHEMA_VERSION,
+                    request_id=request_id,
+                    request_group_id=request_group_id,
+                    parent_request_id=None,
+                    agent_role=self._agent_role(),
+                    step=step,
+                    attempt=attempt + 1,
+                    status="provider_error",
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    raw_usage={},
+                    normalized_usage=normalize_usage(None),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    retryable=exc.retryable,
+                )
                 if not exc.retryable or attempt + 1 >= attempts:
                     raise
                 delay = min(2.0 * (attempt + 1), 8.0)
-                self._emit("llm_retry", attempt=attempt + 1, error=str(exc), delay=delay)
+                self._emit(
+                    "llm_retry",
+                    request_id=request_id,
+                    request_group_id=request_group_id,
+                    step=step,
+                    attempt=attempt + 1,
+                    error=str(exc),
+                    delay=delay,
+                )
                 time.sleep(delay)
+                continue
+            except Exception as exc:
+                self._emit(
+                    "llm_request_finished",
+                    measurement_schema_version=MEASUREMENT_SCHEMA_VERSION,
+                    request_id=request_id,
+                    request_group_id=request_group_id,
+                    parent_request_id=None,
+                    agent_role=self._agent_role(),
+                    step=step,
+                    attempt=attempt + 1,
+                    status="unexpected_error",
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    raw_usage={},
+                    normalized_usage=normalize_usage(None),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    retryable=False,
+                )
+                raise
+
+            normalized = normalize_usage(response.usage)
+            response.request_id = request_id
+            response.normalized_usage = normalized
+            self._emit(
+                "llm_request_finished",
+                measurement_schema_version=MEASUREMENT_SCHEMA_VERSION,
+                request_id=request_id,
+                request_group_id=request_group_id,
+                parent_request_id=None,
+                agent_role=self._agent_role(),
+                step=step,
+                attempt=attempt + 1,
+                status="success",
+                latency_ms=int((time.monotonic() - started) * 1000),
+                raw_usage=dict(response.usage or {}),
+                normalized_usage=normalized,
+                stop_reason=response.stop_reason,
+                error_type=None,
+                error=None,
+                retryable=False,
+            )
+            return response
         raise LLMError("unreachable")
+
+    def _agent_role(self) -> str:
+        if self.agent_name == "main":
+            return "main"
+        if self.agent_name.startswith("subagent"):
+            return "subagent"
+        return self.agent_name
 
     def _validate_final(
         self,

@@ -116,6 +116,11 @@ def test_fold_event_logs_token_statistics(tmp_path: Path) -> None:
     assert set(payload["after"]) >= {"stable_prefix", "task_tool_state", "recent_trajectory", "agent_state", "total"}
     assert payload["folded"]["group_count"] == 1
     assert "compression_ratio" in payload["folded"]
+    assert payload["folded"]["compression_ratio"] == payload["folded"]["residual_ratio"]
+    assert abs(
+        payload["folded"]["fold_reduction_ratio"]
+        - (1 - payload["folded"]["residual_ratio"])
+    ) < 1e-6
     assert context.session.metrics["last_fold"]["fold_id"] == payload["fold_id"]
 
     archive = context.trajectory_archive.read_groups()

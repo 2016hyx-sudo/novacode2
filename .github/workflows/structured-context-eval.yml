@@ -1,0 +1,30 @@
+name: structured-context-eval
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  offline-replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e . pytest ruff
+      - run: python -m pytest -q
+      - run: >-
+          python -m evals.structured_context offline
+          --baseline evals/structured_context/baselines/offline-core-12-summary.json
+          --output .eval-results/offline
+      - run: >-
+          python -m evals.structured_context compare
+          --result .eval-results/offline/requests.jsonl
+          --baseline evals/structured_context/baselines/offline-core-12-requests.jsonl
+      - run: ruff check .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: structured-context-offline-report
+          path: .eval-results/offline/

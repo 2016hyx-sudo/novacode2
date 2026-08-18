@@ -136,7 +136,7 @@ class StructuredHarness(Harness):
         context.set_checkpoint_callback(lambda step: self._periodic_checkpoint(session_id, step))
         context.set_post_fold_callback(lambda step: self._post_fold_checkpoint(session_id, step))
         context.set_trace(self.trace)
-        context.set_fold_engine(FoldEngine(self.provider, token_counter=context.token_counter))
+        context.set_fold_engine(self._fold_engine(context))
         context.set_tool_schemas(self.tools.schemas())
         context.set_planner_enabled(self.planner is not None)
         self._contexts[session_id] = context
@@ -283,7 +283,7 @@ class StructuredHarness(Harness):
         context = self._contexts.get(session.session_id)
         if context is not None:
             # Provider may have been swapped after new_session (demo/test pattern).
-            context.set_fold_engine(FoldEngine(self.provider, token_counter=context.token_counter))
+            context.set_fold_engine(self._fold_engine(context))
         if context is None:
             context = self.structured_store.load_context(
                 session.session_id,
@@ -357,6 +357,15 @@ class StructuredHarness(Harness):
             drift=checkpoint["drift"].get("severity"),
         )
         return result
+
+    def _fold_engine(self, context: StructuredContext) -> FoldEngine:
+        return FoldEngine(
+            self.provider,
+            token_counter=context.token_counter,
+            trace=self.trace,
+            provider_name=self.config.llm.provider,
+            model=self.config.llm.model,
+        )
 
     def _replan_after_drift(
         self,

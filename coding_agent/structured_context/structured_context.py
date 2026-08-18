@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm.base import Message, ToolCall, ToolSchema
+from ..llm.usage import MEASUREMENT_SCHEMA_VERSION
 from ..tools.base import ToolResult, format_tool_result_for_llm
 from .artifact_store import ArtifactStore
 from .event_log import EventLog
@@ -60,6 +61,33 @@ class StructuredContextConfig:
         return int(self.max_context_tokens * self.protected_window_ratio)
 
 
+def compress_tool_observation(
+    raw_text: str,
+    *,
+    tool_name: str,
+    artifact_id: str,
+    token_counter: TokenCounter,
+    config: StructuredContextConfig | None = None,
+) -> str:
+    """Production head/tail compressor shared with deterministic replay."""
+
+    selected = config or StructuredContextConfig()
+    if token_counter.estimate_text(raw_text) <= selected.raw_result_threshold_tokens:
+        return raw_text
+    cap = selected.tool_output_caps.get(tool_name, 4_000)
+    char_budget = max(500, cap * 3)
+    head = raw_text[: char_budget // 2]
+    tail = raw_text[-char_budget // 2 :] if len(raw_text) > char_budget else ""
+    omitted = max(0, len(raw_text) - len(head) - len(tail))
+    body = head
+    if omitted:
+        body += f"\n... [omitted {omitted} chars] ...\n"
+    if tail:
+        body += tail
+    body += f"\n[artifact_id: {artifact_id}]"
+    return body[: char_budget + 200]
+
+
 class StructuredContext:
     """Structured conversation context implementing the AgentLoop context surface."""
 
@@ -105,6 +133,7 @@ class StructuredContext:
         self._fold_count = int(session.metrics.get("fold_count", 0))
         self._last_built_messages: list[Message] = []
         self._last_estimate = 0
+        self._last_layers: dict[str, int] = {}
         self._workspace_expected = workspace_expected
         self._messages_dirty = True
         self._tool_schemas: list[ToolSchema] = []
@@ -119,22 +148,71 @@ class StructuredContext:
 
     @property
     def messages(self) -> list[Message]:
-        self.prepare_for_chat()
+        # Ad-hoc inspection should not create a provider-request metric. The
+        # AgentLoop uses snapshot_for_request(), which emits exactly once.
+        self.prepare_for_chat(emit_trace=False)
         return self._last_built_messages
 
-    def prepare_for_chat(self) -> None:
+    def prepare_for_chat(
+        self,
+        *,
+        parent_request_id: str | None = None,
+        step: int | None = None,
+        emit_trace: bool = False,
+    ) -> None:
         """Ensure a fold decision has been made and the prompt plan is fresh."""
-        self._maybe_fold()
+        self._maybe_fold(parent_request_id=parent_request_id, step=step)
         if self._messages_dirty or not self._last_built_messages:
             self._last_built_messages = self._build_messages()
             self._messages_dirty = False
-        self._refresh_estimate()
+        self._refresh_estimate(
+            request_id=parent_request_id,
+            step=step,
+            emit_trace=emit_trace,
+        )
 
-    def _refresh_estimate(self) -> None:
+    def snapshot_for_request(self, *, request_id: str, step: int) -> dict[str, Any]:
+        """Build one request snapshot and its replay anchor.
+
+        AgentLoop deep-copies the returned messages before sending them to the
+        provider, so this method does not expose future context mutations.
+        """
+
+        self.prepare_for_chat(
+            parent_request_id=request_id,
+            step=step,
+            emit_trace=True,
+        )
+        return {
+            "messages": tuple(self._last_built_messages),
+            "metadata": {
+                "event_seq_anchor": self.event_log.last_seq,
+                "epoch_id": self.trajectory.epoch_id,
+                "layers_estimated": dict(self._last_layers),
+            },
+        }
+
+    def _refresh_estimate(
+        self,
+        *,
+        request_id: str | None = None,
+        step: int | None = None,
+        emit_trace: bool = False,
+    ) -> None:
         layers = self._estimate_layers()
+        self._last_layers = dict(layers)
         self._last_estimate = layers["total"]
-        if self._trace is not None:
-            self._trace.emit("context_estimate", **layers)
+        if self._trace is not None and emit_trace:
+            self._trace.emit(
+                "context_estimate",
+                measurement_schema_version=MEASUREMENT_SCHEMA_VERSION,
+                request_id=request_id,
+                agent_role="main",
+                step=step,
+                event_seq_anchor=self.event_log.last_seq,
+                epoch_id=self.trajectory.epoch_id,
+                **layers,
+            )
 
     def _invalidate_messages(self) -> None:
         self._messages_dirty = True
@@ -293,6 +371,14 @@ class StructuredContext:
             tool_call_id=call.id,
             arguments=call.arguments,
         )
+        if self._trace is not None:
+            self._trace.emit(
+                "artifact_stored",
+                artifact_id=artifact_entry["artifact_id"],
+                tool=call.name,
+                tool_call_id=call.id,
+                size=artifact_entry["size"],
+            )
         self._pending_raw_refs.append(
             {
                 "tool_call_id": call.id,
@@ -447,21 +533,13 @@ class StructuredContext:
     # ------------------------------------------------------------------ tool observation
 
     def _compress_observation(self, call: ToolCall, result: ToolResult, raw_text: str, artifact_id: str) -> str:
-        cap = self.config.tool_output_caps.get(call.name, 4_000)
-        if self.token_counter.estimate_text(raw_text) <= self.config.raw_result_threshold_tokens:
-            return raw_text
-        # Deterministic head/tail reduction; tool-specific compressors can replace this.
-        char_budget = max(500, cap * 3)
-        head = raw_text[: char_budget // 2]
-        tail = raw_text[-char_budget // 2 :] if len(raw_text) > char_budget else ""
-        omitted = max(0, len(raw_text) - len(head) - len(tail))
-        body = head
-        if omitted:
-            body += f"\n... [omitted {omitted} chars] ...\n"
-        if tail:
-            body += tail
-        body += f"\n[artifact_id: {artifact_id}]"
-        return body[: char_budget + 200]
+        return compress_tool_observation(
+            raw_text,
+            tool_name=call.name,
+            artifact_id=artifact_id,
+            token_counter=self.token_counter,
+            config=self.config,
+        )
 
     def _record_file_change(self, call: ToolCall) -> None:
         path = str((call.arguments or {}).get("path", ""))
@@ -575,10 +653,22 @@ class StructuredContext:
                     raw_tool_result_refs=self._pending_raw_refs,
                 )
                 self._archived_group_ids.add(self._current_group.group_id)
+            if self._trace is not None:
+                self._trace.emit(
+                    "interaction_group_closed",
+                    group_id=self._current_group.group_id,
+                    epoch_id=self._current_group.epoch_id,
+                    message_count=len(self._current_group.messages),
+                )
             self._current_group = None
             self._pending_raw_refs = []
 
-    def _maybe_fold(self) -> None:
+    def _maybe_fold(
+        self,
+        *,
+        parent_request_id: str | None = None,
+        step: int | None = None,
+    ) -> None:
         if self.trajectory.epoch_id < 0:
             return
         before = self._estimate_layers()
@@ -606,6 +696,14 @@ class StructuredContext:
             groups=eligible,
             epoch_id=old_epoch + 1,
             artifact_store=self.artifact_store,
+            parent_request_id=parent_request_id,
+            step=(
+                step
+                if step is not None
+                else int((self.session.runtime_cursor.get("position") or {}).get("step", 0))
+            ),
+            event_seq_anchor=self.event_log.last_seq,
+            request_epoch_id=old_epoch,
         )
         task_delta = fold_result.task_delta
         tool_delta = fold_result.tool_delta
@@ -650,9 +748,10 @@ class StructuredContext:
         self._invalidate_messages()
         self._invalidate_actual_cache()
         after = self._estimate_layers()
-        compression_ratio = 0.0
+        residual_ratio = 0.0
         if folded_tokens > 0:
-            compression_ratio = (task_delta_tokens + tool_delta_tokens) / folded_tokens
+            residual_ratio = (task_delta_tokens + tool_delta_tokens) / folded_tokens
+        fold_reduction_ratio = 1.0 - residual_ratio if folded_tokens > 0 else 0.0
         fold_event = {
             "fold_id": f"fold-{self._fold_count}",
             "ts": utcnow(),
@@ -670,7 +769,11 @@ class StructuredContext:
                 "trajectory_tokens_removed": folded_tokens,
                 "task_delta_tokens": task_delta_tokens,
                 "tool_delta_tokens": tool_delta_tokens,
-                "compression_ratio": round(compression_ratio, 6),
+                # Kept for schema compatibility; this is a residual ratio, not
+                # the end-to-end Context Reduction Ratio (CRR).
+                "compression_ratio": round(residual_ratio, 6),
+                "residual_ratio": round(residual_ratio, 6),
+                "fold_reduction_ratio": round(fold_reduction_ratio, 6),
             },
             "model": fold_result.model_stats(),
             "result": {
@@ -685,13 +788,17 @@ class StructuredContext:
             "ts": fold_event["ts"],
             "estimated_tokens_before": before["total"],
             "estimated_tokens_after": after["total"],
-            "compression_ratio": fold_event["folded"]["compression_ratio"],
+            "compression_ratio": fold_event["folded"]["residual_ratio"],
+            "residual_ratio": fold_event["folded"]["residual_ratio"],
+            "fold_reduction_ratio": fold_event["folded"]["fold_reduction_ratio"],
             "target_met": fold_event["result"]["target_met"],
         }
         self.session.metrics["total_folded_trajectory_tokens"] = int(
             self.session.metrics.get("total_folded_trajectory_tokens", 0)
         ) + folded_tokens
-        self.session.metrics["last_compression_ratio"] = fold_event["folded"]["compression_ratio"]
+        self.session.metrics["last_fold_residual_ratio"] = fold_event["folded"]["residual_ratio"]
+        self.session.metrics["last_fold_reduction_ratio"] = fold_event["folded"]["fold_reduction_ratio"]
+        self.session.metrics["last_compression_ratio"] = fold_event["folded"]["residual_ratio"]
         if self._trace is not None:
             self._trace.emit("fold_event", **fold_event)
 

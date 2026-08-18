@@ -1,0 +1,81 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "novacode-structured-context-core-30",
+  "dataset_version": "2026-08-18.1",
+  "description": "Deterministic data definitions for offline context replay and full-run structured-context evaluation.",
+  "scenario_count": 30,
+  "offline_case_count": 12,
+  "bucket_counts": {
+    "short-control": 4,
+    "tool-output-heavy": 6,
+    "long-trajectory": 5,
+    "state-churn": 4,
+    "protocol-edge": 4,
+    "resume-recovery": 3,
+    "multilingual-code": 2,
+    "subagent-fold-overhead": 2
+  },
+  "variants": ["raw_full", "observation_full", "structured"],
+  "reproducibility": {
+    "network_allowed": false,
+    "fixture_seed_required": true,
+    "fixture_hash_required_before_run": true,
+    "workspace_isolation_required": true,
+    "source_data_is_immutable": true
+  },
+  "fixture_templates": {
+    "python-micro-package": {
+      "language": "python",
+      "description": "Small standard-library package with unit tests and one localized defect.",
+      "parameters": ["module_count", "test_count", "defect", "padding_lines"]
+    },
+    "python-log-pipeline": {
+      "language": "python",
+      "description": "Parser and aggregator with deterministic generated logs and failing tests.",
+      "parameters": ["log_chars", "record_count", "marker_position", "defect"]
+    },
+    "python-multimodule-service": {
+      "language": "python",
+      "description": "Layered service/repository/domain package used for long refactors.",
+      "parameters": ["module_count", "test_count", "dependency_depth", "defect_count"]
+    },
+    "python-generated-tree": {
+      "language": "python",
+      "description": "Large deterministic source tree for grep/read and state-churn cases.",
+      "parameters": ["file_count", "lines_per_file", "duplicate_symbols", "stale_fact_count"]
+    },
+    "javascript-browser-app": {
+      "language": "javascript",
+      "description": "Dependency-free browser application with DOM and state tests implemented as Node scripts.",
+      "parameters": ["component_count", "event_count", "defect", "padding_lines"]
+    },
+    "mixed-config-repo": {
+      "language": "mixed",
+      "description": "Python, JSON, Markdown and Unicode paths/content for tokenizer and encoding coverage.",
+      "parameters": ["languages", "unicode_paths", "json_records", "defect"]
+    },
+    "git-recovery-repo": {
+      "language": "python",
+      "description": "Small git repository with declared checkpoint and drift mutation recipes.",
+      "parameters": ["drift", "impacted_paths", "branch_change", "expected_action"]
+    },
+    "python-monorepo": {
+      "language": "python",
+      "description": "Multiple packages with cross-package failure suitable for delegated investigation.",
+      "parameters": ["package_count", "files_per_package", "failure_packages", "large_outputs"]
+    }
+  },
+  "content_profiles": {
+    "ascii-log": "Numbered log lines with deterministic INFO/WARN/ERROR distribution and a unique critical marker.",
+    "python-source": "Syntactically valid generated Python functions with unique symbols and deterministic comments.",
+    "json-records": "Canonical JSON records with stable key ordering and one malformed or inconsistent record.",
+    "unicode-mixed": "Chinese prose, Unicode identifiers, JSON, paths and short code fragments.",
+    "test-failure-stream": "Repeated test progress plus a bounded failure traceback and final summary.",
+    "parallel-tool-batch": "Assistant tool-call groups containing two to four calls and matching results."
+  },
+  "default_limits": {
+    "max_steps": 30,
+    "max_tool_calls": 80,
+    "max_subagents": 3
+  }
+}

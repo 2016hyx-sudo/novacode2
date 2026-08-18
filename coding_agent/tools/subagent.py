@@ -95,6 +95,7 @@ class SubagentTool:
         text = getattr(outcome, "text", "") or ""
         status = getattr(outcome, "status", "failed")
         success = status == "completed"
+        report = getattr(outcome, "structured_report", None)
         self._emit(
             "subagent_end",
             ok=success,
@@ -103,6 +104,7 @@ class SubagentTool:
             tool_calls_used=getattr(outcome, "tool_calls_used", 0),
             duration_ms=duration_ms,
             depth=self.current_depth + 1,
+            structured_report=report if isinstance(report, dict) else None,
         )
         metadata = {
             "subagent_status": status,
@@ -110,7 +112,6 @@ class SubagentTool:
             "subagent_tool_calls": getattr(outcome, "tool_calls_used", 0),
             "subagent_depth": self.current_depth + 1,
         }
-        report = getattr(outcome, "structured_report", None)
         if isinstance(report, dict):
             metadata["structured_report"] = report
         return ToolResult(

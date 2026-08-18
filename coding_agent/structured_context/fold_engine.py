@@ -7,12 +7,21 @@ existing deterministic extractor.
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm.base import LLMProvider, Message
+from ..llm.usage import (
+    MEASUREMENT_SCHEMA_VERSION,
+    new_request_id,
+    normalize_usage,
+    request_payload_hash,
+)
+from ..runtime.trace import TraceWriter
 from .models import InteractionGroup, TaskState, ToolState
 from .state_merge import TASK_LIST_TARGETS, TOOL_LIST_TARGETS, deterministic_fold_delta
 from .token_counter import TokenCounter
@@ -38,6 +47,9 @@ class FoldResult:
     fallback_used: bool = False
     last_error: str = ""
     notes: list[str] = field(default_factory=list)
+    request_ids: list[str] = field(default_factory=list)
+    logical_input_tokens: int = 0
+    output_tokens: int = 0
 
     def model_stats(self) -> dict[str, Any]:
         return {
@@ -46,6 +58,9 @@ class FoldResult:
             "retries": self.retries,
             "fallback_used": self.fallback_used,
             "last_error": self.last_error,
+            "request_ids": list(self.request_ids),
+            "logical_input_tokens": self.logical_input_tokens,
+            "output_tokens": self.output_tokens,
         }
 
 
@@ -73,10 +88,16 @@ class FoldEngine:
         *,
         token_counter: TokenCounter | None = None,
         config: FoldEngineConfig | None = None,
+        trace: TraceWriter | None = None,
+        provider_name: str = "",
+        model: str = "",
     ) -> None:
         self.provider = provider
         self.token_counter = token_counter or TokenCounter()
         self.config = config or FoldEngineConfig()
+        self.trace = trace
+        self.provider_name = provider_name
+        self.model = model
 
     def fold(
         self,
@@ -86,14 +107,50 @@ class FoldEngine:
         groups: list[InteractionGroup],
         epoch_id: int,
         artifact_store: Any | None = None,
+        parent_request_id: str | None = None,
+        step: int = 0,
+        event_seq_anchor: int | None = None,
+        request_epoch_id: int | None = None,
     ) -> FoldResult:
         if self.provider is None:
             return self._fallback(task_state, tool_state, groups, epoch_id, "no fold provider configured")
 
         last_error = ""
+        request_ids: list[str] = []
+        logical_input_tokens = 0
+        output_tokens = 0
+        try:
+            snapshot = self._build_request_messages(task_state, tool_state, groups)
+        except Exception as exc:
+            return self._fallback(
+                task_state,
+                tool_state,
+                groups,
+                epoch_id,
+                f"{type(exc).__name__}: {exc}",
+            )
+
         for attempt in range(1, self.config.max_attempts + 1):
+            request_id = new_request_id()
+            request_ids.append(request_id)
             try:
-                text = self._request_delta(task_state, tool_state, groups)
+                response = self._request_delta(
+                    snapshot,
+                    request_id=request_id,
+                    parent_request_id=parent_request_id,
+                    step=step,
+                    attempt=attempt,
+                    epoch_id=(epoch_id if request_epoch_id is None else request_epoch_id),
+                    event_seq_anchor=event_seq_anchor,
+                )
+                logical_input_tokens += int(
+                    response.normalized_usage.get("logical_input_tokens", 0)
+                )
+                output_tokens += int(response.normalized_usage.get("output_tokens", 0))
+                text = (response.text or "").strip()
+                if not text:
+                    raise FoldError("fold model returned empty text")
+                text = text[: self.config.max_output_chars]
                 task_delta, tool_delta = self._parse_delta(text)
                 self._validate_delta(task_delta, task_state.to_dict(), TASK_LIST_TARGETS, "task")
                 self._validate_delta(tool_delta, tool_state.to_dict(), TOOL_LIST_TARGETS, "tool")
@@ -106,6 +163,9 @@ class FoldEngine:
                     retries=attempt - 1,
                     fallback_used=False,
                     notes=[f"llm fold succeeded on attempt {attempt}"],
+                    request_ids=request_ids,
+                    logical_input_tokens=logical_input_tokens,
+                    output_tokens=output_tokens,
                 )
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
@@ -118,18 +178,21 @@ class FoldEngine:
             groups,
             epoch_id,
             last_error or "llm fold failed",
-            calls=self.config.max_attempts,
-            retries=self.config.max_attempts - 1,
+            calls=len(request_ids),
+            retries=max(0, len(request_ids) - 1),
+            request_ids=request_ids,
+            logical_input_tokens=logical_input_tokens,
+            output_tokens=output_tokens,
         )
 
     # ------------------------------------------------------------------ model call
 
-    def _request_delta(
+    def _build_request_messages(
         self,
         task_state: TaskState,
         tool_state: ToolState,
         groups: list[InteractionGroup],
-    ) -> str:
+    ) -> tuple[Message, ...]:
         system = (
             "You are the fold compressor of a coding agent's structured context. "
             "Read the current Task State, Tool State and the completed Interaction "
@@ -169,11 +232,95 @@ class FoldEngine:
             Message(role="system", content=system),
             Message(role="user", content=user),
         ]
-        response = self.provider.chat(messages, tools=[])
-        text = (response.text or "").strip()
-        if not text:
-            raise FoldError("fold model returned empty text")
-        return text[: self.config.max_output_chars]
+        return tuple(messages)
+
+    def _request_delta(
+        self,
+        snapshot: tuple[Message, ...],
+        *,
+        request_id: str,
+        parent_request_id: str | None,
+        step: int,
+        attempt: int,
+        epoch_id: int,
+        event_seq_anchor: int | None,
+    ):
+        assert self.provider is not None
+        messages = tuple(copy.deepcopy(list(snapshot)))
+        tools = ()
+        payload_hash = request_payload_hash(messages, tools)
+        estimated_input_tokens = self.token_counter.estimate_prompt(
+            system_text="",
+            tools=tools,
+            messages=list(messages),
+        )
+        prepared = {
+            "measurement_schema_version": MEASUREMENT_SCHEMA_VERSION,
+            "request_id": request_id,
+            "request_group_id": parent_request_id or request_id,
+            "parent_request_id": parent_request_id,
+            "agent_role": "fold",
+            "step": step,
+            "attempt": attempt,
+            "epoch_id": epoch_id,
+            "event_seq_anchor": event_seq_anchor,
+            "message_count": len(messages),
+            "tool_count": 0,
+            "tools": [],
+            "payload_hash": payload_hash,
+            "estimated_input_tokens": estimated_input_tokens,
+            "provider": self.provider_name,
+            "model": self.model,
+        }
+        self._emit("llm_request_prepared", **prepared)
+        self._emit("llm_request", **prepared)
+        started = time.monotonic()
+        try:
+            response = self.provider.chat(messages, tools=tools)
+        except Exception as exc:
+            self._emit(
+                "llm_request_finished",
+                measurement_schema_version=MEASUREMENT_SCHEMA_VERSION,
+                request_id=request_id,
+                request_group_id=parent_request_id or request_id,
+                parent_request_id=parent_request_id,
+                agent_role="fold",
+                step=step,
+                attempt=attempt,
+                epoch_id=epoch_id,
+                status="provider_error",
+                latency_ms=int((time.monotonic() - started) * 1000),
+                raw_usage={},
+                normalized_usage=normalize_usage(None),
+                error_type=type(exc).__name__,
+                error=str(exc),
+                retryable=bool(getattr(exc, "retryable", False)),
+            )
+            raise
+
+        normalized = normalize_usage(response.usage)
+        response.request_id = request_id
+        response.normalized_usage = normalized
+        self._emit(
+            "llm_request_finished",
+            measurement_schema_version=MEASUREMENT_SCHEMA_VERSION,
+            request_id=request_id,
+            request_group_id=parent_request_id or request_id,
+            parent_request_id=parent_request_id,
+            agent_role="fold",
+            step=step,
+            attempt=attempt,
+            epoch_id=epoch_id,
+            status="success",
+            latency_ms=int((time.monotonic() - started) * 1000),
+            raw_usage=dict(response.usage or {}),
+            normalized_usage=normalized,
+            stop_reason=response.stop_reason,
+            error_type=None,
+            error=None,
+            retryable=False,
+        )
+        return response
 
     def _group_for_model(self, group: InteractionGroup) -> dict[str, Any]:
         data = group.to_dict()
@@ -298,6 +445,9 @@ class FoldEngine:
         *,
         calls: int = 0,
         retries: int = 0,
+        request_ids: list[str] | None = None,
+        logical_input_tokens: int = 0,
+        output_tokens: int = 0,
     ) -> FoldResult:
         task_delta, tool_delta = deterministic_fold_delta(
             task_state, tool_state, groups, epoch_id=epoch_id
@@ -311,7 +461,14 @@ class FoldEngine:
             fallback_used=True,
             last_error=reason,
             notes=["deterministic fallback used"],
+            request_ids=list(request_ids or []),
+            logical_input_tokens=logical_input_tokens,
+            output_tokens=output_tokens,
         )
+
+    def _emit(self, event_type: str, **data: Any) -> None:
+        if self.trace is not None:
+            self.trace.emit(event_type, agent="fold", **data)
 
 
 def _lookup_list(

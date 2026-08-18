@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm.base import Message, ToolSchema
+from ..llm.usage import normalize_usage
 
 
 @dataclass
@@ -109,11 +110,12 @@ class TokenCounter:
 
     def record_usage(self, estimate: int, usage: TokenUsage | dict[str, Any]) -> None:
         if isinstance(usage, dict):
+            normalized = normalize_usage(usage)
             usage = TokenUsage(
-                prompt_tokens=int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+                prompt_tokens=int(normalized["logical_input_tokens"]),
                 cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
                 cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
-                output_tokens=int(usage.get("output_tokens") or 0),
+                output_tokens=int(normalized["output_tokens"]),
             )
         self.calibration.record(estimate, usage)
 
