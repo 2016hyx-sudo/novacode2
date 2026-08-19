@@ -3,10 +3,13 @@
 The recipe materializer is deliberately local-only.  It creates synthetic
 interaction groups and content-addressed tool artifacts in memory, then
 replays the same history as raw, observation, and structured prompts.  It is
-not an agent runner and never calls an LLM or the network.
+not an agent runner and never calls an LLM or the network — unless an
+explicit ``fold_engine`` is injected, in which case fold points run the real
+FoldEngine pipeline (offline-llm-fold mode; all LLM imports stay lazy).
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -982,8 +985,14 @@ def materialize_offline_case(
     *,
     token_counter: TokenCounter | None = None,
     include_prompts: bool = False,
+    fold_engine: Any | None = None,
 ) -> list[ReplayRequest]:
-    """Materialize one deterministic recipe into replay request records."""
+    """Materialize one deterministic recipe into replay request records.
+
+    With ``fold_engine`` injected, every fold point runs the real
+    FoldEngine pipeline (state adapters -> fold -> delta merge) instead of
+    the rule-only simulation; scheduling changes are identical either way.
+    """
     if not isinstance(case.get("generator"), Mapping):
         raise ReplayError("offline case is missing generator")
     counter = token_counter or TokenCounter()
@@ -1067,8 +1076,70 @@ def materialize_offline_case(
                 )
                 retained = [item for item in retained if item not in eligible]
                 epoch_id += 1
-                fold_events.append(
-                    {
+                if fold_engine is not None:
+                    # Real FoldEngine pipeline: adapt the synthetic state and
+                    # groups, fold, then merge the returned deltas back so
+                    # later structured prompts reflect LLM fold output.
+                    # Imports stay lazy: the pure offline path never touches
+                    # the LLM stack.
+                    from .llm_fold import (
+                        _groups_from_recipe,
+                        _recipe_task_dict,
+                        _recipe_tool_state,
+                        _task_state_to_recipe,
+                        _tool_state_to_recipe,
+                    )
+                    from coding_agent.structured_context.models import TaskState
+                    from coding_agent.structured_context.state_merge import (
+                        merge_task_delta,
+                        merge_tool_delta,
+                    )
+
+                    task_state = TaskState.from_dict(_recipe_task_dict(state, case_id))
+                    tool_state = _recipe_tool_state(state)
+                    trace = getattr(fold_engine, "trace", None)
+                    if trace is not None:
+                        trace.bind(f"offline-llm-{case_id}")
+                    result = fold_engine.fold(
+                        task_state=task_state,
+                        tool_state=tool_state,
+                        groups=_groups_from_recipe(eligible),
+                        epoch_id=epoch_id,
+                        parent_request_id=f"offline-{case_id}-{step:04d}",
+                        step=step,
+                        event_seq_anchor=step * 10,
+                    )
+                    merged_task = task_state.to_dict()
+                    merge_task_delta(merged_task, result.task_delta)
+                    merged_tool = tool_state.to_dict()
+                    merge_tool_delta(merged_tool, result.tool_delta)
+                    _task_state_to_recipe(state, merged_task)
+                    _tool_state_to_recipe(state, merged_tool)
+                    fold_event = {
+                        "fold_id": f"fold-{len(fold_events) + 1}",
+                        "step": step,
+                        "epoch_id": epoch_id,
+                        "folded_group_ids": folded_ids,
+                        "trigger_tokens": trigger,
+                        "input_tokens_estimated": fold_input_tokens,
+                        "model_used": bool(result.model_used),
+                        "fallback_used": bool(result.fallback_used),
+                        "calls": int(result.calls),
+                        "retries": int(result.retries),
+                        "last_error": str(result.last_error or ""),
+                        "request_ids": list(result.request_ids),
+                        "logical_input_tokens": int(result.logical_input_tokens),
+                        "output_tokens": int(result.output_tokens),
+                        "cache_hit_tokens": int(result.cache_hit_tokens),
+                        "cache_creation_input_tokens": int(result.cache_creation_input_tokens),
+                        "fresh_processed_input_tokens": int(result.fresh_processed_input_tokens),
+                        "notes": list(result.notes),
+                        "task_delta": dict(result.task_delta),
+                        "tool_delta": dict(result.tool_delta),
+                        "state_after": copy.deepcopy(state),
+                    }
+                else:
+                    fold_event = {
                         "fold_id": f"fold-{len(fold_events) + 1}",
                         "step": step,
                         "epoch_id": epoch_id,
@@ -1076,7 +1147,7 @@ def materialize_offline_case(
                         "trigger_tokens": trigger,
                         "input_tokens_estimated": fold_input_tokens,
                     }
-                )
+                fold_events.append(fold_event)
                 if bool(expected.get("state_compact")) and not compact_events:
                     budgets = dict(generator.get("state_budgets") or {})
                     compact = _compact_state(state, budgets=budgets, artifacts=artifacts)
@@ -1181,12 +1252,20 @@ def materialize_offline_cases(
     *,
     token_counter: TokenCounter | None = None,
     include_prompts: bool = False,
+    fold_engine: Any | None = None,
 ) -> list[ReplayRequest]:
     """Materialize every recipe in stable case/step order."""
     counter = token_counter or TokenCounter()
     result: list[ReplayRequest] = []
     for case in load_offline_cases(source):
-        result.extend(materialize_offline_case(case, token_counter=counter, include_prompts=include_prompts))
+        result.extend(
+            materialize_offline_case(
+                case,
+                token_counter=counter,
+                include_prompts=include_prompts,
+                fold_engine=fold_engine,
+            )
+        )
     return result
 
 

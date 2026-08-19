@@ -50,6 +50,11 @@ class FoldResult:
     request_ids: list[str] = field(default_factory=list)
     logical_input_tokens: int = 0
     output_tokens: int = 0
+    # Cache-accounting tokens from the provider's usage report (0 for
+    # providers that do not report a cache split).
+    cache_hit_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    fresh_processed_input_tokens: int = 0
 
     def model_stats(self) -> dict[str, Any]:
         return {
@@ -61,13 +66,16 @@ class FoldResult:
             "request_ids": list(self.request_ids),
             "logical_input_tokens": self.logical_input_tokens,
             "output_tokens": self.output_tokens,
+            "cache_hit_tokens": self.cache_hit_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "fresh_processed_input_tokens": self.fresh_processed_input_tokens,
         }
 
 
 @dataclass
 class FoldEngineConfig:
     max_attempts: int = 2
-    max_input_chars: int = 60_000
+    max_input_chars: int = 200_000
     max_assistant_chars: int = 2_000
     max_tool_chars: int = 1_000
     max_output_chars: int = 24_000
@@ -127,6 +135,9 @@ class FoldEngine:
         request_ids: list[str] = []
         logical_input_tokens = 0
         output_tokens = 0
+        cache_hit_tokens = 0
+        cache_creation_input_tokens = 0
+        fresh_processed_input_tokens = 0
         try:
             snapshot = self._build_request_messages(task_state, tool_state, groups)
         except Exception as exc:
@@ -156,6 +167,15 @@ class FoldEngine:
                     response.normalized_usage.get("logical_input_tokens", 0)
                 )
                 output_tokens += int(response.normalized_usage.get("output_tokens", 0))
+                cache_hit_tokens += int(
+                    response.normalized_usage.get("cache_hit_tokens", 0)
+                )
+                cache_creation_input_tokens += int(
+                    response.normalized_usage.get("cache_creation_input_tokens", 0)
+                )
+                fresh_processed_input_tokens += int(
+                    response.normalized_usage.get("fresh_processed_input_tokens", 0)
+                )
                 text = (response.text or "").strip()
                 if not text:
                     raise FoldError("fold model returned empty text")
@@ -175,6 +195,9 @@ class FoldEngine:
                     request_ids=request_ids,
                     logical_input_tokens=logical_input_tokens,
                     output_tokens=output_tokens,
+                    cache_hit_tokens=cache_hit_tokens,
+                    cache_creation_input_tokens=cache_creation_input_tokens,
+                    fresh_processed_input_tokens=fresh_processed_input_tokens,
                 )
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
@@ -193,6 +216,9 @@ class FoldEngine:
             request_ids=request_ids,
             logical_input_tokens=logical_input_tokens,
             output_tokens=output_tokens,
+            cache_hit_tokens=cache_hit_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+            fresh_processed_input_tokens=fresh_processed_input_tokens,
         )
 
     @staticmethod
@@ -888,6 +914,9 @@ Before returning the JSON, verify all of the following:
         request_ids: list[str] | None = None,
         logical_input_tokens: int = 0,
         output_tokens: int = 0,
+        cache_hit_tokens: int = 0,
+        cache_creation_input_tokens: int = 0,
+        fresh_processed_input_tokens: int = 0,
     ) -> FoldResult:
         task_delta, tool_delta = deterministic_fold_delta(
             task_state, tool_state, groups, epoch_id=epoch_id
@@ -904,6 +933,9 @@ Before returning the JSON, verify all of the following:
             request_ids=list(request_ids or []),
             logical_input_tokens=logical_input_tokens,
             output_tokens=output_tokens,
+            cache_hit_tokens=cache_hit_tokens,
+            cache_creation_input_tokens=cache_creation_input_tokens,
+            fresh_processed_input_tokens=fresh_processed_input_tokens,
         )
 
     def _emit(self, event_type: str, **data: Any) -> None:

@@ -193,7 +193,7 @@ class BuilderConfig:
     # Hard floor on how many of the most recent groups stay verbatim, so
     # retrieval always has a recent window even when the fold is very compact.
     min_recent_groups: int = 1
-    fold_max_input_chars: int = 60_000
+    fold_max_input_chars: int = 200_000
     fold_max_attempts: int = 3
     compact_task_budget_tokens: int = 8_000
     compact_tool_budget_tokens: int = 8_000

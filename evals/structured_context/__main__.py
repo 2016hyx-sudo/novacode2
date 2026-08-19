@@ -70,6 +70,44 @@ def _run(args: argparse.Namespace) -> int:
     return 0 if result.metadata.get("passed", False) and gate_passed else 1
 
 
+def _offline_llm_fold(args: argparse.Namespace) -> int:
+    from .llm_fold import build_fold_engine_from_env, run_llm_fold_replay
+    from .report import build_summary
+
+    if not args.provider_env:
+        raise ValueError(
+            "offline-llm-fold never constructs a live provider implicitly; "
+            "pass --provider-env to build one from the environment"
+        )
+    from config import load_env_file
+
+    load_env_file()
+    fold_engine = build_fold_engine_from_env(trace_dir=args.output)
+    result = run_llm_fold_replay(
+        args.cases, fold_engine=fold_engine, min_requests=args.min_requests
+    )
+    paths = write_report(result, args.output, baseline=args.baseline)
+    summary = build_summary(result, baseline=args.baseline)
+    gate_passed = bool((summary.get("gates") or {}).get("passed"))
+    failed_cases = int(result.manifest.get("failed_case_count", 0))
+    print(
+        _json(
+            {
+                "mode": result.mode,
+                "main_requests": result.manifest.get("main_request_count", 0),
+                "fold_requests": result.manifest.get("fold_request_count", 0),
+                "model_calls": result.manifest.get("model_calls", 0),
+                "llm_folds": result.manifest.get("llm_folds", 0),
+                "fallback_folds": result.manifest.get("fallback_folds", 0),
+                "failed_cases": failed_cases,
+                "gate_passed": gate_passed,
+                "output": {key: str(value) for key, value in paths.items()},
+            }
+        )
+    )
+    return 0 if gate_passed and failed_cases == 0 else 1
+
+
 def _compare(args: argparse.Namespace) -> int:
     current = _load_comparison_input(args.result)
     baseline = _load_comparison_input(args.baseline)
@@ -95,6 +133,26 @@ def build_parser() -> argparse.ArgumentParser:
     offline.add_argument("--baseline", type=Path, default=None)
     offline.add_argument("--min-requests", type=int, default=200)
     offline.set_defaults(handler=_offline)
+
+    llm_fold = subparsers.add_parser(
+        "offline-llm-fold",
+        help="replay offline recipes with the real FoldEngine at each fold point",
+    )
+    llm_fold.add_argument("--cases", type=Path, default=None, help="offline_cases.json override")
+    llm_fold.add_argument("--output", type=Path, default=Path(".eval-results/offline-llm-fold"))
+    llm_fold.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="summary.json from a previous offline-llm-fold run (never the offline-core baseline)",
+    )
+    llm_fold.add_argument("--min-requests", type=int, default=200)
+    llm_fold.add_argument(
+        "--provider-env",
+        action="store_true",
+        help="build the fold provider from NOVACODE_PROVIDER / *_API_KEY / .env (required)",
+    )
+    llm_fold.set_defaults(handler=_offline_llm_fold)
 
     run = subparsers.add_parser("run", help="run a complete isolated scripted conversation")
     run.add_argument("--scripted", action="store_true", help="use the deterministic no-network provider")
