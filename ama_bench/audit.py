@@ -77,6 +77,15 @@ def compact_memory_stats(stats: Mapping[str, Any]) -> dict[str, Any]:
         "fallback_folds": stats.get("fallback_folds", 0),
         "fold_calls": stats.get("fold_calls", 0),
         "fold_errors": stats.get("fold_errors", 0),
+        # LLM token spend of the fold stage itself (summed over fold events).
+        "fold_input_tokens": sum(
+            int(event.get("logical_input_tokens") or 0)
+            for event in stats.get("fold_events") or []
+        ),
+        "fold_output_tokens": sum(
+            int(event.get("output_tokens") or 0)
+            for event in stats.get("fold_events") or []
+        ),
         "compact_task_evicted": len(stats.get("compact_task_evicted") or []),
         "compact_tool_evicted": len(stats.get("compact_tool_evicted") or []),
         "work_dir": stats.get("work_dir"),

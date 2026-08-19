@@ -331,7 +331,7 @@ def _query(
 
 
 def _merge_usage(usages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Sum per-call normalized usage into one episode/run-level summary.
+    """Sum per-call normalized usage into one episode-level summary.
 
     Keeps the same keys as the session-level aggregation
     (``UsageStats.to_dict``) and the eval summary (``aggregate_usage``), so
@@ -351,9 +351,40 @@ def _merge_usage(usages: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _merge_usage_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum already-aggregated episode usage summaries into a run-level view.
+
+    Each item is an episode-level summary produced by ``_merge_usage``.  The
+    request count is summed explicitly rather than recomputed as
+    ``len(summaries)`` — otherwise every episode collapses into one "request".
+    """
+    logical = sum(int(item.get("logical_input_tokens") or 0) for item in summaries)
+    cache_hit = sum(int(item.get("cache_hit_tokens") or 0) for item in summaries)
+    fresh = sum(int(item.get("fresh_processed_input_tokens") or 0) for item in summaries)
+    output = sum(int(item.get("output_tokens") or 0) for item in summaries)
+    return {
+        "request_count": sum(int(item.get("request_count") or 0) for item in summaries),
+        "logical_input_tokens": logical,
+        "cache_hit_tokens": cache_hit,
+        "fresh_processed_input_tokens": fresh,
+        "output_tokens": output,
+        "cache_hit_rate": cache_hit / logical if logical else 0.0,
+    }
+
+
 def _merge_memory_stats(memories: list[dict[str, Any] | None]) -> dict[str, int]:
     """Sum per-episode compact memory summaries into one run-level view."""
-    merged = {"episodes": 0, "pre": 0, "post": 0, "groups": 0, "folded": 0, "model": 0, "fallback": 0}
+    merged = {
+        "episodes": 0,
+        "pre": 0,
+        "post": 0,
+        "groups": 0,
+        "folded": 0,
+        "model": 0,
+        "fallback": 0,
+        "fold_input": 0,
+        "fold_output": 0,
+    }
     for memory in memories:
         if not memory:
             continue
@@ -364,6 +395,8 @@ def _merge_memory_stats(memories: list[dict[str, Any] | None]) -> dict[str, int]
         merged["folded"] += int(memory.get("groups_folded") or 0)
         merged["model"] += int(memory.get("model_folds") or 0)
         merged["fallback"] += int(memory.get("fallback_folds") or 0)
+        merged["fold_input"] += int(memory.get("fold_input_tokens") or 0)
+        merged["fold_output"] += int(memory.get("fold_output_tokens") or 0)
     return merged
 
 
@@ -600,7 +633,9 @@ def main(argv: list[str] | None = None) -> int:
     output = write_results(args.output, results)
     print(f"[ama] results written to {output}")
 
-    total_usage = _merge_usage([result["usage"] for result in results if result.get("usage")])
+    total_usage = _merge_usage_summaries(
+        [result["usage"] for result in results if result.get("usage")]
+    )
     print(
         f"[ama] usage: {total_usage['request_count']} requests, "
         f"{total_usage['logical_input_tokens']} input tokens "
@@ -618,7 +653,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"[ama] memory: pre={memory_summary['pre']} tok, post={memory_summary['post']} tok, "
             f"residual {ratio:.1f}%, folded {memory_summary['folded']}/{memory_summary['groups']} groups "
-            f"({memory_summary['model']} model, {memory_summary['fallback']} fallback folds)"
+            f"({memory_summary['model']} model, {memory_summary['fallback']} fallback folds, "
+            f"fold LLM {memory_summary['fold_input']} in / {memory_summary['fold_output']} out tok)"
         )
     print(f"[ama] audit files written to {audit_dir}")
 

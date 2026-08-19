@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ama_bench.run import (
+    _merge_usage_summaries,
     _query,
     detect_subset,
     exact_match_accuracy,
@@ -128,3 +131,51 @@ def test_exact_match_accuracy_mcq() -> None:
     assert stats["correct"] == 1
     assert stats["total"] == 2
     assert stats["accuracy"] == 0.5
+
+
+def test_merge_usage_summaries_sums_episode_summaries() -> None:
+    """Run-level merge must sum request_count, not count episodes again."""
+    merged = _merge_usage_summaries(
+        [
+            {
+                "request_count": 12,
+                "logical_input_tokens": 13432,
+                "cache_hit_tokens": 12416,
+                "fresh_processed_input_tokens": 1016,
+                "output_tokens": 2858,
+                "cache_hit_rate": 0.9,
+            },
+            {
+                "request_count": 3,
+                "logical_input_tokens": 1000,
+                "cache_hit_tokens": 500,
+                "fresh_processed_input_tokens": 500,
+                "output_tokens": 100,
+                "cache_hit_rate": 0.5,
+            },
+        ]
+    )
+    assert merged["request_count"] == 15
+    assert merged["logical_input_tokens"] == 14432
+    assert merged["cache_hit_tokens"] == 12916
+    assert merged["fresh_processed_input_tokens"] == 1516
+    assert merged["output_tokens"] == 2958
+    assert merged["cache_hit_rate"] == pytest.approx(12916 / 14432)
+
+
+def test_merge_usage_summaries_single_episode() -> None:
+    """One episode must not collapse into a single request."""
+    merged = _merge_usage_summaries(
+        [
+            {
+                "request_count": 12,
+                "logical_input_tokens": 13432,
+                "cache_hit_tokens": 12416,
+                "fresh_processed_input_tokens": 1016,
+                "output_tokens": 2858,
+                "cache_hit_rate": 0.9,
+            }
+        ]
+    )
+    assert merged["request_count"] == 12
+    assert merged["logical_input_tokens"] == 13432
