@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from coding_agent.llm.base import LLMResponse
 from coding_agent.structured_context.artifact_store import ArtifactStore
 from coding_agent.structured_context.event_log import EventLog
 from coding_agent.structured_context.models import TaskState
@@ -124,6 +126,165 @@ def test_fold_prompt_instructs_key_sequences() -> None:
     assert "key_sequences" in system_prompt
     assert "intent" in system_prompt
     assert "state, not transcript" in system_prompt
+
+
+def test_fold_prompt_documents_target_field() -> None:
+    """The fold prompt must spell out the `target` key on delta entries, since
+    omitting it was the cause of repeated `unknown task delta target ''`
+    validation failures."""
+    from coding_agent.llm.base import Message
+    from coding_agent.structured_context.fold_engine import FoldEngine
+    from coding_agent.structured_context.models import InteractionGroup, ToolState
+
+    group = InteractionGroup(group_id="g-1", epoch_id=0, created_step=0)
+    group.messages.append(Message(role="user", content="hello"))
+    engine = FoldEngine(None)
+    messages = engine._build_request_messages(
+        TaskState.new(task_id="t", objective="o"), ToolState.new(), [group]
+    )
+    system_prompt = messages[0].content
+    assert '"target"' in system_prompt
+    assert "allowed_task_targets" in system_prompt
+    assert "upsert" in system_prompt and "append" in system_prompt
+    assert "remove" in system_prompt and "mark_stale" in system_prompt
+    # A concrete target-bearing example, not just a mention.
+    assert '"target": "key_findings"' in system_prompt
+    # The validation checklist must reference the target rule too.
+    assert "non-empty `\"target\"`" in system_prompt or "non-empty \"target\"" in system_prompt
+
+
+class _FoldRetryLLM:
+    """First call returns a delta that parses but is missing `target`; later
+    calls return a valid delta. Records every message list it received."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.seen: list[list[object]] = []
+
+    def chat(self, messages, tools=None, *, reasoning_effort=None):
+        self.calls += 1
+        self.seen.append(list(messages))
+        if self.calls == 1:
+            delta = {
+                "task_delta": {
+                    "set": {},
+                    "upsert": [
+                        {"value": {"id": "k-1", "fact": "x", "evidence": [], "status": "valid"}}
+                    ],
+                    "append": [],
+                    "remove": [],
+                    "mark_stale": [],
+                },
+                "tool_delta": {"set": {}, "upsert": [], "append": [], "remove": [], "mark_stale": []},
+            }
+        else:
+            delta = {
+                "task_delta": {
+                    "set": {},
+                    "upsert": [
+                        {
+                            "target": "key_findings",
+                            "value": {"id": "k-1", "fact": "x", "evidence": [], "status": "valid", "updated_step": 1},
+                        }
+                    ],
+                    "append": [],
+                    "remove": [],
+                    "mark_stale": [],
+                },
+                "tool_delta": {"set": {}, "upsert": [], "append": [], "remove": [], "mark_stale": []},
+            }
+        return LLMResponse(text=json.dumps(delta), stop_reason="end_turn")
+
+
+def _fold_engine(provider) -> FoldEngine:
+    from coding_agent.structured_context.fold_engine import FoldEngine, FoldEngineConfig, TokenCounter
+
+    return FoldEngine(
+        provider,
+        token_counter=TokenCounter(),
+        config=FoldEngineConfig(max_attempts=3, retry_delay_s=0),
+    )
+
+
+def _fold_group():
+    from coding_agent.llm.base import Message
+    from coding_agent.structured_context.models import InteractionGroup
+
+    group = InteractionGroup(group_id="g-1", epoch_id=0, created_step=0)
+    group.messages.append(Message(role="user", content="hello"))
+    return group
+
+
+def test_fold_retry_feeds_validation_error_back() -> None:
+    """A retry must include the previous validation error as a trailing user
+    message so a systematic mistake (missing `target`) can be self-corrected."""
+    from coding_agent.structured_context.models import TaskState, ToolState
+
+    llm = _FoldRetryLLM()
+    engine = _fold_engine(llm)
+    result = engine.fold(
+        task_state=TaskState.new(task_id="t", objective="o"),
+        tool_state=ToolState.new(),
+        groups=[_fold_group()],
+        epoch_id=1,
+    )
+    assert result.model_used is True
+    assert result.calls == 2
+    assert result.retries == 1
+    assert result.fallback_used is False
+    assert result.task_delta["upsert"][0]["target"] == "key_findings"
+    # Attempt 2 must have carried the error from attempt 1.
+    assert len(llm.seen) == 2
+    feedback = llm.seen[1][-1]
+    assert feedback.role == "user"
+    assert "unknown task delta target" in feedback.content
+    assert "corrected" in feedback.content
+    # Attempt 1 must NOT have had the feedback message.
+    assert len(llm.seen[0]) == 2
+
+
+def test_fold_retry_feedback_included_when_all_attempts_fail() -> None:
+    """When every attempt is invalid, the fallback still records the last
+    error, and each retry gets the feedback message."""
+    from coding_agent.structured_context.models import TaskState, ToolState
+
+    class _AlwaysInvalid:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages, tools=None, *, reasoning_effort=None):
+            self.calls += 1
+            self.seen = list(messages)
+            delta = {
+                "task_delta": {
+                    "set": {},
+                    "upsert": [
+                        {"value": {"id": "k-1", "fact": "x", "evidence": [], "status": "valid"}}
+                    ],
+                    "append": [],
+                    "remove": [],
+                    "mark_stale": [],
+                },
+                "tool_delta": {"set": {}, "upsert": [], "append": [], "remove": [], "mark_stale": []},
+            }
+            return LLMResponse(text=json.dumps(delta), stop_reason="end_turn")
+
+    llm = _AlwaysInvalid()
+    engine = _fold_engine(llm)
+    result = engine.fold(
+        task_state=TaskState.new(task_id="t", objective="o"),
+        tool_state=ToolState.new(),
+        groups=[_fold_group()],
+        epoch_id=1,
+    )
+    assert result.model_used is False
+    assert result.fallback_used is True
+    assert result.calls == 3
+    assert result.retries == 2
+    assert "unknown task delta target" in result.last_error
+    assert "in upsert[0]" in result.last_error
+    # The last attempt received feedback (system, user, feedback).
+    assert len(llm.seen) == 3
 
 
 def test_workspace_diff(tmp_path: Path) -> None:

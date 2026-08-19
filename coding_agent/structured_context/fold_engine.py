@@ -141,9 +141,10 @@ class FoldEngine:
         for attempt in range(1, self.config.max_attempts + 1):
             request_id = new_request_id()
             request_ids.append(request_id)
+            messages = self._with_retry_feedback(snapshot, last_error, attempt)
             try:
                 response = self._request_delta(
-                    snapshot,
+                    messages,
                     request_id=request_id,
                     parent_request_id=parent_request_id,
                     step=step,
@@ -194,6 +195,31 @@ class FoldEngine:
             output_tokens=output_tokens,
         )
 
+    @staticmethod
+    def _with_retry_feedback(
+        snapshot: tuple[Message, ...],
+        last_error: str,
+        attempt: int,
+    ) -> tuple[Message, ...]:
+        """Append the previous attempt's validation error on retries.
+
+        A systematic mistake (e.g. entries missing ``target``) will be repeated
+        verbatim unless the model is told what failed, so on retries the last
+        error is fed back as a trailing user message instead of re-sending the
+        identical prompt.
+        """
+        if attempt <= 1 or not last_error:
+            return snapshot
+        feedback = (
+            "Your previous fold output was rejected by validation. Error:\n\n"
+            f"{last_error}\n\n"
+            "Return a single corrected JSON delta that fixes this error. Every "
+            'upsert/append/remove/mark_stale entry must carry a non-empty '
+            '"target" from the allowed targets. Do not repeat the rejected '
+            "structure."
+        )
+        return snapshot + (Message(role="user", content=feedback),)
+
     # ------------------------------------------------------------------ model call
 
     def _build_request_messages(
@@ -240,6 +266,39 @@ Return exactly one JSON object with this shape:
 ```
 
 All five operation keys must always be present under both deltas.
+
+### Entry schema for `upsert` / `append` / `remove` / `mark_stale`
+
+Every element of these four lists must be an object with a `"target"` key. The
+`target` must be one of `allowed_task_targets` (for `task_delta`) or
+`allowed_tool_targets` (for `tool_delta`) from the input — never empty, never
+invented. A `target` that is missing, empty, or not in the allowed list causes
+the whole delta to be rejected.
+
+* `upsert` entries: `{"target": "<allowed target>", "value": {<entity with "id">}}`
+* `append` entries: `{"target": "<allowed target>", "item": {<entity with "id">}}`
+* `remove` / `mark_stale` entries: `{"target": "<allowed target>", "id": "<existing entity id>"}` (`mark_stale` may also add a `"reason"`)
+
+Example of a valid `task_delta`:
+
+```json
+{
+  "task_delta": {
+    "set": {"progress.current": "implementing retry handling"},
+    "upsert": [
+      {"target": "key_findings", "value": {"id": "kf-3", "fact": "retry() sleeps before reconnecting", "evidence": [], "status": "verified", "updated_step": 42}}
+    ],
+    "append": [
+      {"target": "key_sequences", "item": {"id": "seq-1", "pattern": "run test, read traceback, patch", "intent": "fix flaky test", "step_range": "41-44", "status": "valid"}}
+    ],
+    "remove": [{"target": "unresolved", "id": "unres-2"}],
+    "mark_stale": [{"target": "key_findings", "id": "kf-1", "reason": "superseded by kf-3"}]
+  }
+}
+```
+
+Every `upsert` value and every appended `item` must contain an `"id"`. The
+`target` of each entry must be one of the allowed targets for that delta.
 
 Return JSON only.
 
@@ -545,7 +604,9 @@ Before returning the JSON, verify all of the following:
    * `"remove"`
    * `"mark_stale"`
 4. `task_delta.set` is either `{}` or contains only `"progress.current"`.
-5. Every upserted entity contains an `"id"`.
+5. Every upserted entity contains an `"id"`, and every `upsert`/`append`/
+   `remove`/`mark_stale` entry carries a non-empty `"target"` from the allowed
+   list.
 6. Every removed or stale id already exists in the current state.
 7. No new fact was invented.
 8. Hypotheses were not upgraded into facts.
@@ -759,30 +820,42 @@ Before returning the JSON, verify all of the following:
             raise FoldDeltaValidationError(f"{label} delta does not support set operations")
 
         for operation in ("remove", "mark_stale"):
-            for raw_entry in delta.get(operation) or []:
+            for index, raw_entry in enumerate(delta.get(operation) or []):
                 if not isinstance(raw_entry, dict):
-                    raise FoldDeltaValidationError(f"{label} {operation} entry must be an object")
+                    raise FoldDeltaValidationError(
+                        f"{label} {operation}[{index}] entry must be an object"
+                    )
                 target = str(raw_entry.get("target", ""))
                 item_id = str(raw_entry.get("id", ""))
                 if target not in table:
-                    raise FoldDeltaValidationError(f"unknown {label} delta target {target!r}")
+                    raise FoldDeltaValidationError(
+                        f"unknown {label} delta target {target!r} in {operation}[{index}]"
+                    )
                 items = _lookup_list(current_state, target, table)
                 if not any(str(item.get("id", "")) == item_id for item in items):
-                    raise FoldDeltaValidationError(f"{label} {operation} references missing id {item_id!r}")
+                    raise FoldDeltaValidationError(
+                        f"{label} {operation}[{index}] references missing id {item_id!r}"
+                    )
 
         for operation in ("upsert", "append"):
-            for raw_entry in delta.get(operation) or []:
+            for index, raw_entry in enumerate(delta.get(operation) or []):
                 if not isinstance(raw_entry, dict):
-                    raise FoldDeltaValidationError(f"{label} {operation} entry must be an object")
+                    raise FoldDeltaValidationError(
+                        f"{label} {operation}[{index}] entry must be an object"
+                    )
                 target = str(raw_entry.get("target", ""))
                 if target not in table:
-                    raise FoldDeltaValidationError(f"unknown {label} delta target {target!r}")
+                    raise FoldDeltaValidationError(
+                        f"unknown {label} delta target {target!r} in {operation}[{index}]"
+                    )
                 value = raw_entry.get("value" if operation == "upsert" else "item")
                 if not isinstance(value, dict):
-                    raise FoldDeltaValidationError(f"{label} {operation} entry must contain an object")
+                    raise FoldDeltaValidationError(
+                        f"{label} {operation}[{index}] entry must contain an object"
+                    )
                 item_id = str(value.get("id") or raw_entry.get("id") or "")
                 if operation == "upsert" and not item_id:
-                    raise FoldDeltaValidationError(f"{label} upsert requires an id")
+                    raise FoldDeltaValidationError(f"{label} upsert[{index}] requires an id")
 
     @staticmethod
     def _validate_artifact_refs(
