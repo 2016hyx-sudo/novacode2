@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "suite": "offline-core-12",
+  "suite": "offline-core-15",
   "description": "Deterministic recipes for materializing request histories. No expected CRR or percentile is stored in source data.",
   "cases": [
     {
@@ -270,6 +270,83 @@
         {"type": "canonical_json_stable"},
         {"type": "critical_marker_recoverable"},
         {"type": "reported_and_estimated_tokens_kept_separate"}
+      ]
+    },
+    {
+      "id": "offline-reasoning-anthropic-13",
+      "bucket": "protocol-edge",
+      "description": "Anthropic-shaped thinking blocks on every assistant turn; reasoning survives reconstruction and is counted in all three variants.",
+      "generator": {
+        "seed": 9013,
+        "logical_window_tokens": 40000,
+        "interaction_groups": 8,
+        "group_profile": "mixed-tool-cycle",
+        "reasoning": {"mode": "anthropic-thinking", "chars_each": 1200, "unicode": false},
+        "tool_results": [
+          {"tool": "read_file", "count": 4, "chars_each": 8000, "content_profile": "python-source", "critical_marker_position": "middle"},
+          {"tool": "run_shell", "count": 4, "chars_each": 6000, "content_profile": "test-failure-stream", "critical_marker_position": "tail"}
+        ],
+        "state_items": {"task_findings": 10, "task_decisions": 3, "tool_entries": 8},
+        "language_mix": ["en", "python"]
+      },
+      "expected": {"tool_compression": true, "fold": false, "state_compact": false, "protected_recent_groups": 3, "reasoning": true},
+      "assertions": [
+        {"type": "reasoning_blocks_present"},
+        {"type": "reasoning_marker_in_thinking"},
+        {"type": "reasoning_in_all_variants"},
+        {"type": "all_groups_protocol_complete"},
+        {"type": "artifact_roundtrip"}
+      ]
+    },
+    {
+      "id": "offline-reasoning-openai-14",
+      "bucket": "multilingual-code",
+      "description": "OpenAI reasoning_content blocks with Unicode thinking text; exercises estimator behavior on CJK reasoning without a fold.",
+      "generator": {
+        "seed": 9014,
+        "logical_window_tokens": 50000,
+        "interaction_groups": 10,
+        "group_profile": "mixed-tool-cycle",
+        "reasoning": {"mode": "openai-reasoning", "chars_each": 1400, "unicode": true},
+        "tool_results": [
+          {"tool": "read_file", "count": 5, "chars_each": 20000, "content_profile": "unicode-mixed", "critical_marker_position": "middle"},
+          {"tool": "run_shell", "count": 5, "chars_each": 12000, "content_profile": "json-records", "critical_marker_position": "tail"}
+        ],
+        "state_items": {"task_findings": 14, "task_decisions": 4, "tool_entries": 10},
+        "language_mix": ["zh-CN", "ja-JP", "en", "unicode-paths"]
+      },
+      "expected": {"tool_compression": true, "fold": false, "state_compact": false, "protected_recent_groups": 3, "reasoning": true, "calibration_slice": "multilingual-reasoning"},
+      "assertions": [
+        {"type": "reasoning_blocks_present"},
+        {"type": "reasoning_marker_in_thinking"},
+        {"type": "reasoning_in_all_variants"},
+        {"type": "unicode_roundtrip"},
+        {"type": "canonical_json_stable"}
+      ]
+    },
+    {
+      "id": "offline-reasoning-fold-15",
+      "bucket": "long-trajectory",
+      "description": "Thinking-heavy trajectory crosses the fold trigger; folded groups' reasoning is archived and dropped from the structured prompt while raw keeps it.",
+      "generator": {
+        "seed": 9015,
+        "logical_window_tokens": 34000,
+        "target_usage_ratio": 0.72,
+        "interaction_groups": 22,
+        "group_profile": "mixed-tool-cycle",
+        "reasoning": {"mode": "anthropic-thinking", "chars_each": 2400, "unicode": false},
+        "tool_results": [{"tool": "read_file", "count": 20, "chars_each": 12000, "content_profile": "python-source", "critical_marker_position": "middle"}],
+        "state_items": {"task_findings": 30, "task_decisions": 8, "tool_entries": 20},
+        "language_mix": ["en", "python"]
+      },
+      "expected": {"tool_compression": true, "fold": true, "state_compact": false, "protected_recent_groups": 3, "reasoning": true},
+      "assertions": [
+        {"type": "reasoning_blocks_present"},
+        {"type": "reasoning_in_all_variants"},
+        {"type": "reasoning_archived_on_fold"},
+        {"type": "fold_event_count_at_least", "value": 1},
+        {"type": "epoch_increment", "value": 1},
+        {"type": "request_anchors_monotonic"}
       ]
     }
   ]

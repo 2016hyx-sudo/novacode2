@@ -7,9 +7,12 @@ back to the exact stage that failed (memory loss, retrieval miss, or answer
 generation).
 
 Size control: structural data (group inventory, fold events, retrieval scores,
-prompt hashes) is always recorded.  Full content (group messages, evidence
-blocks, prompts, the post-fold memory dump) is only stored when ``full`` is
-set; otherwise hashes and char counts stand in.
+prompt hashes) is always recorded.  The full pre-compression trajectory text
+and the full post-fold memory dump are ALWAYS recorded too — they are the
+before/after evidence needed to re-evaluate an episode later.  The remaining
+heavy content (full pre-fold group objects, per-question evidence blocks and
+prompts) is only stored when ``full`` is set; otherwise hashes and char counts
+stand in.
 """
 from __future__ import annotations
 
@@ -87,6 +90,7 @@ def build_audit_record(
     memory: NovaCodeMemory,
     questions: list[dict[str, Any]],
     outcome: dict[str, Any],
+    trajectory_text: str,
     full: bool,
 ) -> dict[str, Any]:
     """Assemble the per-episode audit record from stage artifacts.
@@ -97,6 +101,13 @@ def build_audit_record(
          "evidence" (rendered block), "prompt", "answer", "usage"}
 
     ``outcome`` holds the final answers plus the merged usage summary.
+
+    The full pre-compression trajectory text (``trajectory_text``, the exact
+    input fed to memory construction) and the full post-compression memory dump
+    (``memory.to_dict()``) are ALWAYS recorded, so an episode can be re-evaluated
+    later without rebuilding memory.  Only the heavy per-question content (full
+    evidence blocks, prompts) and the full pre-fold group objects stay gated
+    behind ``full``.
     """
     episode_id = int(episode.get("episode_id", 0))
     stats = memory.stats
@@ -119,16 +130,20 @@ def build_audit_record(
                 "evicted_tool_items": [dict(item) for item in stats.get("compact_tool_evicted") or []],
             },
             "post_fold_summary": summarize_post_fold_memory(memory),
+            # Full compressed memory (task/tool state + kept trajectory groups).
+            # Always recorded so later evaluation needs no rebuild.
+            "post_fold_memory": memory.to_dict(),
         },
         "pre_fold": {
             "group_inventory": [dict(item) for item in stats.get("group_inventory", [])],
+            # The exact pre-compression input text. Always recorded.
+            "trajectory_text": trajectory_text,
         },
         "questions": questions,
         "outcome": outcome,
     }
     if full:
         record["pre_fold"]["groups"] = _read_prefold_groups(stats.get("work_dir"))
-        record["memory"]["post_fold_memory"] = memory.to_dict()
     return record
 
 

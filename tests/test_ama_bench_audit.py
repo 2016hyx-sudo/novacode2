@@ -96,6 +96,7 @@ def test_build_audit_record_compact_shape() -> None:
         memory=memory,
         questions=[{"question": "q1"}, {"question": "q2"}],
         outcome=outcome,
+        trajectory_text=render_trajectory(EPISODE),
         full=False,
     )
     assert record["episode_id"] == 7
@@ -105,9 +106,12 @@ def test_build_audit_record_compact_shape() -> None:
     assert record["memory"]["residual_ratio"] == pytest.approx(
         record["memory"]["post_fold_tokens"] / record["memory"]["pre_fold_tokens"]
     )
-    # Compact: no full pre-fold groups, no post-fold memory dump, counts only.
+    # Always recorded: full pre-fold trajectory text and full post-fold memory,
+    # so the episode can be re-evaluated without rebuilding memory.
+    assert record["pre_fold"]["trajectory_text"] == render_trajectory(EPISODE)
+    assert record["memory"]["post_fold_memory"]["task_state"]
+    # Only the full pre-fold group objects (from the work dir) stay opt-in.
     assert "groups" not in record["pre_fold"]
-    assert "post_fold_memory" not in record["memory"]
     assert record["pre_fold"]["group_inventory"]
     assert record["outcome"] == outcome
 
@@ -119,11 +123,13 @@ def test_build_audit_record_full_includes_content() -> None:
         memory=memory,
         questions=[],
         outcome={"answer_list": []},
+        trajectory_text=render_trajectory(EPISODE),
         full=True,
     )
     groups = record["pre_fold"]["groups"]
     assert groups  # full pre-fold groups read back from the work dir
     assert all("messages" in group for group in groups)
+    assert record["pre_fold"]["trajectory_text"] == render_trajectory(EPISODE)
     assert "post_fold_memory" in record["memory"]
     assert record["memory"]["post_fold_summary"]["recent_groups"]
 
@@ -135,6 +141,28 @@ def test_write_audit_is_atomic_and_named_by_episode(tmp_path: Path) -> None:
     assert not list(tmp_path.glob("*.tmp"))
     write_audit({"episode_id": 7, "payload": 2}, tmp_path)
     assert json.loads(path.read_text(encoding="utf-8"))["payload"] == 2
+
+
+def test_run_episode_audit_carries_full_before_after(tmp_path: Path) -> None:
+    """Every run persists the full pre-fold trajectory text and post-fold memory."""
+    from ama_bench.method import NovaCodeMemoryMethod
+
+    audit_dir = tmp_path / "audit"
+    method = NovaCodeMemoryMethod()
+    run_episode(
+        method,
+        CannedProvider(),
+        EPISODE,
+        subset="mcq",
+        max_tokens=256,
+        per_question=True,
+        audit_dir=audit_dir,
+    )
+    record = json.loads((audit_dir / "7.json").read_text(encoding="utf-8"))
+    assert record["pre_fold"]["trajectory_text"] == render_trajectory(EPISODE)
+    assert record["memory"]["post_fold_memory"]["task_state"]
+    assert record["memory"]["post_fold_memory"]["trajectory"]["groups"]
+    assert record["questions"]  # per-question retrieval recorded
 
 
 def test_compact_memory_stats_counts_evictions() -> None:

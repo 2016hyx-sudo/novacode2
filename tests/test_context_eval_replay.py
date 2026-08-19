@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from coding_agent.llm.base import Message, ToolCall
 
 from evals.structured_context.full_context import (
     ReplayError,
+    load_offline_cases,
     materialize_offline_case,
     reconstruct_prompt_variants,
     run_offline_replay,
@@ -29,7 +31,7 @@ def test_offline_replay_is_deterministic_and_has_pr_sized_population() -> None:
     assert sum(item.agent_role == "main" for item in first.requests) >= 200
     assert [item.to_dict() for item in first.requests] == [item.to_dict() for item in second.requests]
     assert any(item.agent_role == "fold" for item in first.requests)
-    assert first.manifest["main_request_count"] == 238
+    assert first.manifest["main_request_count"] == 278
 
 
 def test_threshold_and_fold_recipe_contracts() -> None:
@@ -98,6 +100,38 @@ def test_report_files_are_stable_and_atomic_at_call_boundary(tmp_path: Path) -> 
     write_report(result, tmp_path)
     assert {name: path.read_bytes() for name, path in paths.items()} == first
     assert {path.name for path in paths.values()} == {"requests.jsonl", "summary.json", "report.md"}
+
+
+def test_reasoning_recipes_preserve_and_count_thinking_blocks() -> None:
+    result = run_offline_replay()
+    anthropic = _case(result, "offline-reasoning-anthropic-13")
+    openai = _case(result, "offline-reasoning-openai-14")
+    assert anthropic
+    assert openai
+    for record in (*anthropic, *openai):
+        assert record.layers.get("reasoning", 0) > 0
+
+    cases = {str(case["id"]): case for case in load_offline_cases()}
+    fold_replay = materialize_offline_case(cases["offline-reasoning-fold-15"])
+    assert fold_replay
+    last = fold_replay[-1]
+    assert last.metric.replay["fold_count"] >= 1
+    # Folded thinking is archived: raw keeps all groups' reasoning while the
+    # structured prompt only retains the recent protected groups' reasoning.
+    assert last.variants["raw_full"].layers["reasoning"] > last.variants["structured"].layers["reasoning"] > 0
+
+
+def test_reasoning_marker_survives_into_reconstructed_messages() -> None:
+    cases = {str(case["id"]): case for case in load_offline_cases()}
+    anthropic = materialize_offline_case(cases["offline-reasoning-anthropic-13"], include_prompts=True)
+    openai = materialize_offline_case(cases["offline-reasoning-openai-14"], include_prompts=True)
+    for replay in (anthropic, openai):
+        for request in replay:
+            for variant in request.variants.values():
+                assert any(
+                    "THINKING:" in json.dumps(message, ensure_ascii=False, default=str)
+                    for message in variant.messages
+                )
 
 
 def test_unknown_recipe_assertion_fails_closed() -> None:

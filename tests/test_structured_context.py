@@ -77,6 +77,38 @@ def test_key_sequences_merge_and_roundtrip() -> None:
     assert restored.key_sequences[0].step_range == "7-8"
 
 
+def test_fold_parse_delta_tolerates_single_quoted_json() -> None:
+    from coding_agent.structured_context.fold_engine import FoldDeltaValidationError, FoldEngine
+
+    single_quoted = """{
+        'task_delta': {
+            'set': {'progress.current': 'moved the ball'},
+            'upsert': [
+                {'target': 'key_sequences', 'id': 'ks-1',
+                 'value': {'id': 'ks-1', 'pattern': 'right then left', 'intent': 'probe',
+                           'step_range': '41-42', 'status': 'valid'}},
+            ],
+            'append': [], 'remove': [], 'mark_stale': [],
+        },
+        'tool_delta': {'set': {}, 'upsert': [], 'append': [], 'remove': [], 'mark_stale': []},
+    }"""
+    task_delta, tool_delta = FoldEngine._parse_delta(single_quoted)
+    assert task_delta["set"] == {"progress.current": "moved the ball"}
+    assert task_delta["upsert"][0]["target"] == "key_sequences"
+    assert tool_delta == {"set": {}, "upsert": [], "append": [], "remove": [], "mark_stale": []}
+
+
+def test_fold_parse_delta_rejects_broken_json() -> None:
+    from coding_agent.structured_context.fold_engine import FoldDeltaValidationError, FoldEngine
+
+    try:
+        FoldEngine._parse_delta('{"task_delta": ')
+    except FoldDeltaValidationError as exc:
+        assert "invalid JSON" in str(exc)
+    else:
+        raise AssertionError("expected FoldDeltaValidationError for truncated JSON")
+
+
 def test_fold_prompt_instructs_key_sequences() -> None:
     from coding_agent.llm.base import Message
     from coding_agent.structured_context.fold_engine import FoldEngine
@@ -91,7 +123,7 @@ def test_fold_prompt_instructs_key_sequences() -> None:
     system_prompt = messages[0].content
     assert "key_sequences" in system_prompt
     assert "intent" in system_prompt
-    assert "exploratory" in system_prompt
+    assert "state, not transcript" in system_prompt
 
 
 def test_workspace_diff(tmp_path: Path) -> None:

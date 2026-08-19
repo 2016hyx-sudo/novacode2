@@ -38,12 +38,21 @@ TOOL_OUTPUT_CAPS: dict[str, int] = {
     "search_files": 2_000,
 }
 
+# A fold batch is the oldest groups folded in one FoldEngine call; the fold
+# loop repeats batches until the context estimate is at or below the target.
+_FOLD_BATCH_MAX = 30
+
 
 @dataclass
 class StructuredContextConfig:
     max_context_tokens: int = 256_000
+    # Folding is triggered when the estimated context usage passes this
+    # fraction of the max window...
     fold_trigger_ratio: float = 0.70
-    fold_target_ratio: float = 0.50
+    # ...and, once triggered, keeps folding the oldest groups until the
+    # post-fold estimate is at or below this fraction of the pre-fold estimate
+    # (e.g. 0.30 = compress the context to 30% of its current size).
+    fold_target_ratio: float = 0.30
     protected_recent_groups: int = 3
     protected_window_ratio: float = 0.30
     tool_output_caps: dict[str, int] = field(default_factory=lambda: dict(TOOL_OUTPUT_CAPS))
@@ -53,9 +62,6 @@ class StructuredContextConfig:
 
     def trigger_tokens(self) -> int:
         return int(self.max_context_tokens * self.fold_trigger_ratio)
-
-    def target_tokens(self) -> int:
-        return int(self.max_context_tokens * self.fold_target_ratio)
 
     def protected_window_tokens(self) -> int:
         return int(self.max_context_tokens * self.protected_window_ratio)
@@ -683,140 +689,158 @@ class StructuredContext:
         before = self._estimate_layers()
         if before["total"] < self.config.trigger_tokens():
             return
-        eligible = [
-            group
-            for group in self.trajectory.groups
-            if not group.protected
-            and group.status == "complete"
-            and group.group_id != self._current_turn_group_id
-        ]
-        if len(self.trajectory.groups) > self.config.protected_recent_groups:
-            eligible = eligible[: max(1, len(self.trajectory.groups) - self.config.protected_recent_groups)]
-        if not eligible:
-            return
-
-        old_epoch = self.trajectory.epoch_id
-        engine = self._fold_engine or FoldEngine(
-            None, token_counter=self.token_counter, config=self.config.fold_engine
+        # Once triggered, keep folding the oldest groups (in bounded batches)
+        # until the post-fold estimate is at or below `fold_target_ratio` x the
+        # pre-fold estimate, or nothing foldable remains.  How many of the most
+        # recent groups survive is derived from that single ratio, not from a
+        # fixed count.
+        target_tokens = max(1, int(before["total"] * self.config.fold_target_ratio))
+        step = (
+            step
+            if step is not None
+            else int((self.session.runtime_cursor.get("position") or {}).get("step", 0))
         )
-        fold_result: FoldResult = engine.fold(
-            task_state=self.task_state,
-            tool_state=self.tool_state,
-            groups=eligible,
-            epoch_id=old_epoch + 1,
-            artifact_store=self.artifact_store,
-            parent_request_id=parent_request_id,
-            step=(
-                step
-                if step is not None
-                else int((self.session.runtime_cursor.get("position") or {}).get("step", 0))
-            ),
-            event_seq_anchor=self.event_log.last_seq,
-            request_epoch_id=old_epoch,
-        )
-        task_delta = fold_result.task_delta
-        tool_delta = fold_result.tool_delta
+        batches_folded = 0
+        while True:
+            eligible = [
+                group
+                for group in self.trajectory.groups
+                if not group.protected
+                and group.status == "complete"
+                and group.group_id != self._current_turn_group_id
+            ]
+            if len(self.trajectory.groups) > self.config.protected_recent_groups:
+                eligible = eligible[: max(1, len(self.trajectory.groups) - self.config.protected_recent_groups)]
+            if not eligible:
+                break
+            batch = eligible
+            if len(batch) > _FOLD_BATCH_MAX:
+                batch = batch[:_FOLD_BATCH_MAX]
 
-        task_dict = self.task_state.to_dict()
-        tool_dict = self.tool_state.to_dict()
-        merge_task_delta(task_dict, task_delta)
-        merge_tool_delta(tool_dict, tool_delta)
-        self.task_state = TaskState.from_dict(task_dict)
-        self.tool_state = ToolState.from_dict(tool_dict)
+            batch_before = self._estimate_layers()
+            old_epoch = self.trajectory.epoch_id
+            engine = self._fold_engine or FoldEngine(
+                None, token_counter=self.token_counter, config=self.config.fold_engine
+            )
+            fold_result: FoldResult = engine.fold(
+                task_state=self.task_state,
+                tool_state=self.tool_state,
+                groups=batch,
+                epoch_id=old_epoch + 1,
+                artifact_store=self.artifact_store,
+                parent_request_id=parent_request_id,
+                step=step,
+                event_seq_anchor=self.event_log.last_seq,
+                request_epoch_id=old_epoch,
+            )
+            task_delta = fold_result.task_delta
+            tool_delta = fold_result.tool_delta
 
-        # Capacity control runs after every fold/merge.
-        compact_result = self._state_compactor.compact(
-            self.task_state,
-            self.tool_state,
-            artifact_store=self.artifact_store,
-        )
-        if compact_result.evicted_task_items or compact_result.evicted_tool_items:
-            self.event_log.append("state_compact", compact_result.to_dict())
+            task_dict = self.task_state.to_dict()
+            tool_dict = self.tool_state.to_dict()
+            merge_task_delta(task_dict, task_delta)
+            merge_tool_delta(tool_dict, tool_delta)
+            self.task_state = TaskState.from_dict(task_dict)
+            self.tool_state = ToolState.from_dict(tool_dict)
 
-        folded_ids = [group.group_id for group in eligible]
-        folded_tokens = sum(group.token_count for group in eligible)
-        task_delta_tokens = self.token_counter.estimate_text(json.dumps(task_delta, ensure_ascii=False))
-        tool_delta_tokens = self.token_counter.estimate_text(json.dumps(tool_delta, ensure_ascii=False))
-        self.trajectory.groups = [group for group in self.trajectory.groups if group.group_id not in folded_ids]
-        self.trajectory.epoch_id = old_epoch + 1
-        self.session.epoch_id = self.trajectory.epoch_id
-        self._fold_count += 1
-        self.session.metrics["fold_count"] = self._fold_count
-        self.event_log.append(
-            "state_delta_applied",
-            {
-                "epoch_from": old_epoch,
-                "epoch_to": self.trajectory.epoch_id,
-                "folded_group_ids": folded_ids,
-                "task_delta": task_delta,
-                "tool_delta": tool_delta,
-            },
-        )
-        self.event_log.append("trajectory_folded", {"folded_group_ids": folded_ids})
+            # Capacity control runs after every fold/merge.
+            compact_result = self._state_compactor.compact(
+                self.task_state,
+                self.tool_state,
+                artifact_store=self.artifact_store,
+            )
+            if compact_result.evicted_task_items or compact_result.evicted_tool_items:
+                self.event_log.append("state_compact", compact_result.to_dict())
 
-        self._invalidate_messages()
-        self._invalidate_actual_cache()
-        after = self._estimate_layers()
-        residual_ratio = 0.0
-        if folded_tokens > 0:
-            residual_ratio = (task_delta_tokens + tool_delta_tokens) / folded_tokens
-        fold_reduction_ratio = 1.0 - residual_ratio if folded_tokens > 0 else 0.0
-        fold_event = {
-            "fold_id": f"fold-{self._fold_count}",
-            "ts": utcnow(),
-            "trigger": {
-                "threshold_tokens": self.config.trigger_tokens(),
-                "threshold_ratio": self.config.fold_trigger_ratio,
-                "estimated_tokens_before": before["total"],
-                "usage_ratio_before": round(before["total"] / self.config.max_context_tokens, 6),
-            },
-            "before": before,
-            "after": after,
-            "folded": {
-                "group_count": len(eligible),
-                "group_ids": folded_ids,
-                "trajectory_tokens_removed": folded_tokens,
-                "task_delta_tokens": task_delta_tokens,
-                "tool_delta_tokens": tool_delta_tokens,
-                # Kept for schema compatibility; this is a residual ratio, not
-                # the end-to-end Context Reduction Ratio (CRR).
-                "compression_ratio": round(residual_ratio, 6),
-                "residual_ratio": round(residual_ratio, 6),
-                "fold_reduction_ratio": round(fold_reduction_ratio, 6),
-            },
-            "model": fold_result.model_stats(),
-            "result": {
-                "target_tokens": self.config.target_tokens(),
-                "target_met": after["total"] <= self.config.target_tokens(),
-                "new_epoch": self.trajectory.epoch_id,
-            },
-        }
-        self.event_log.append("fold_event", fold_event)
-        self.session.metrics["last_fold"] = {
-            "fold_id": fold_event["fold_id"],
-            "ts": fold_event["ts"],
-            "estimated_tokens_before": before["total"],
-            "estimated_tokens_after": after["total"],
-            "compression_ratio": fold_event["folded"]["residual_ratio"],
-            "residual_ratio": fold_event["folded"]["residual_ratio"],
-            "fold_reduction_ratio": fold_event["folded"]["fold_reduction_ratio"],
-            "target_met": fold_event["result"]["target_met"],
-        }
-        self.session.metrics["total_folded_trajectory_tokens"] = int(
-            self.session.metrics.get("total_folded_trajectory_tokens", 0)
-        ) + folded_tokens
-        self.session.metrics["last_fold_residual_ratio"] = fold_event["folded"]["residual_ratio"]
-        self.session.metrics["last_fold_reduction_ratio"] = fold_event["folded"]["fold_reduction_ratio"]
-        self.session.metrics["last_compression_ratio"] = fold_event["folded"]["residual_ratio"]
-        if self._trace is not None:
-            self._trace.emit("fold_event", **fold_event)
+            folded_ids = [group.group_id for group in batch]
+            folded_tokens = sum(group.token_count for group in batch)
+            task_delta_tokens = self.token_counter.estimate_text(json.dumps(task_delta, ensure_ascii=False))
+            tool_delta_tokens = self.token_counter.estimate_text(json.dumps(tool_delta, ensure_ascii=False))
+            self.trajectory.groups = [group for group in self.trajectory.groups if group.group_id not in folded_ids]
+            self.trajectory.epoch_id = old_epoch + 1
+            self.session.epoch_id = self.trajectory.epoch_id
+            self._fold_count += 1
+            self.session.metrics["fold_count"] = self._fold_count
+            self.event_log.append(
+                "state_delta_applied",
+                {
+                    "epoch_from": old_epoch,
+                    "epoch_to": self.trajectory.epoch_id,
+                    "folded_group_ids": folded_ids,
+                    "task_delta": task_delta,
+                    "tool_delta": tool_delta,
+                },
+            )
+            self.event_log.append("trajectory_folded", {"folded_group_ids": folded_ids})
 
-        # Fold is a safe cut point: persist a post_fold checkpoint immediately.
-        step = int((self.session.runtime_cursor.get("position") or {}).get("step", 0))
-        if self._post_fold_callback is not None:
-            self._post_fold_callback(step)
-        elif self._checkpoint_callback is not None:
-            self._checkpoint_callback(step)
+            self._invalidate_messages()
+            self._invalidate_actual_cache()
+            batches_folded += 1
+            after = self._estimate_layers()
+            residual_ratio = 0.0
+            if folded_tokens > 0:
+                residual_ratio = (task_delta_tokens + tool_delta_tokens) / folded_tokens
+            fold_reduction_ratio = 1.0 - residual_ratio if folded_tokens > 0 else 0.0
+            fold_event = {
+                "fold_id": f"fold-{self._fold_count}",
+                "ts": utcnow(),
+                "trigger": {
+                    "threshold_tokens": self.config.trigger_tokens(),
+                    "threshold_ratio": self.config.fold_trigger_ratio,
+                    "estimated_tokens_before": batch_before["total"],
+                    "usage_ratio_before": round(batch_before["total"] / self.config.max_context_tokens, 6),
+                },
+                "before": batch_before,
+                "after": after,
+                "folded": {
+                    "group_count": len(batch),
+                    "group_ids": folded_ids,
+                    "trajectory_tokens_removed": folded_tokens,
+                    "task_delta_tokens": task_delta_tokens,
+                    "tool_delta_tokens": tool_delta_tokens,
+                    # Kept for schema compatibility; this is a residual ratio, not
+                    # the end-to-end Context Reduction Ratio (CRR).
+                    "compression_ratio": round(residual_ratio, 6),
+                    "residual_ratio": round(residual_ratio, 6),
+                    "fold_reduction_ratio": round(fold_reduction_ratio, 6),
+                },
+                "model": fold_result.model_stats(),
+                "result": {
+                    "target_tokens": target_tokens,
+                    "target_met": after["total"] <= target_tokens,
+                    "new_epoch": self.trajectory.epoch_id,
+                },
+            }
+            self.event_log.append("fold_event", fold_event)
+            self.session.metrics["last_fold"] = {
+                "fold_id": fold_event["fold_id"],
+                "ts": fold_event["ts"],
+                "estimated_tokens_before": batch_before["total"],
+                "estimated_tokens_after": after["total"],
+                "compression_ratio": fold_event["folded"]["residual_ratio"],
+                "residual_ratio": fold_event["folded"]["residual_ratio"],
+                "fold_reduction_ratio": fold_event["folded"]["fold_reduction_ratio"],
+                "target_met": fold_event["result"]["target_met"],
+            }
+            self.session.metrics["total_folded_trajectory_tokens"] = int(
+                self.session.metrics.get("total_folded_trajectory_tokens", 0)
+            ) + folded_tokens
+            self.session.metrics["last_fold_residual_ratio"] = fold_event["folded"]["residual_ratio"]
+            self.session.metrics["last_fold_reduction_ratio"] = fold_event["folded"]["fold_reduction_ratio"]
+            self.session.metrics["last_compression_ratio"] = fold_event["folded"]["residual_ratio"]
+            if self._trace is not None:
+                self._trace.emit("fold_event", **fold_event)
+            if after["total"] <= target_tokens:
+                break
+
+        # Fold is a safe cut point: persist a post_fold checkpoint once, after
+        # the whole fold loop has converged to the target.
+        if batches_folded:
+            step = int((self.session.runtime_cursor.get("position") or {}).get("step", 0))
+            if self._post_fold_callback is not None:
+                self._post_fold_callback(step)
+            elif self._checkpoint_callback is not None:
+                self._checkpoint_callback(step)
 
     def _estimate_layers(self) -> dict[str, int]:
         state_block = self._state_block_text()

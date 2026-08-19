@@ -151,7 +151,9 @@ def run_episode(
             "reasoning_trace": "",
             "usage": _merge_usage([]),
         }
-        return _with_audit(base, memory, episode, audit_questions, audit_dir, audit_full)
+        return _with_audit(
+            base, memory, episode, audit_questions, audit_dir, audit_full, trajectory_text
+        )
 
     usages: list[dict[str, Any]] = []
     if per_question:
@@ -217,7 +219,9 @@ def run_episode(
         "reasoning_trace": "",
         "usage": _merge_usage(usages),
     }
-    return _with_audit(result, memory, episode, audit_questions, audit_dir, audit_full)
+    return _with_audit(
+        result, memory, episode, audit_questions, audit_dir, audit_full, trajectory_text
+    )
 
 
 def _with_audit(
@@ -227,6 +231,7 @@ def _with_audit(
     audit_questions: list[dict[str, Any]],
     audit_dir: str | Path | None,
     audit_full: bool,
+    trajectory_text: str,
 ) -> dict[str, Any]:
     """Attach the per-episode audit trail to a result record (optional).
 
@@ -246,6 +251,7 @@ def _with_audit(
             "reasoning_trace": result["reasoning_trace"],
             "usage": result.get("usage") or {},
         },
+        trajectory_text=trajectory_text,
         full=audit_full,
     )
     path = write_audit(record, Path(audit_dir))

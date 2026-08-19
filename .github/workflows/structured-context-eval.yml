@@ -17,12 +17,12 @@ jobs:
       - run: python -m pytest -q
       - run: >-
           python -m evals.structured_context offline
-          --baseline evals/structured_context/baselines/offline-core-12-summary.json
+          --baseline evals/structured_context/baselines/offline-core-15-summary.json
           --output .eval-results/offline
       - run: >-
           python -m evals.structured_context compare
           --result .eval-results/offline/requests.jsonl
-          --baseline evals/structured_context/baselines/offline-core-12-requests.jsonl
+          --baseline evals/structured_context/baselines/offline-core-15-requests.jsonl
       - run: ruff check .
       - uses: actions/upload-artifact@v4
         with:
