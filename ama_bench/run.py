@@ -151,7 +151,9 @@ def run_episode(
             "reasoning_trace": "",
             "usage": _merge_usage([]),
         }
-        return _with_audit(base, memory, episode, audit_questions, audit_dir, audit_full)
+        return _with_audit(
+            base, memory, episode, audit_questions, audit_dir, audit_full, trajectory_text
+        )
 
     usages: list[dict[str, Any]] = []
     if per_question:
@@ -217,7 +219,9 @@ def run_episode(
         "reasoning_trace": "",
         "usage": _merge_usage(usages),
     }
-    return _with_audit(result, memory, episode, audit_questions, audit_dir, audit_full)
+    return _with_audit(
+        result, memory, episode, audit_questions, audit_dir, audit_full, trajectory_text
+    )
 
 
 def _with_audit(
@@ -227,6 +231,7 @@ def _with_audit(
     audit_questions: list[dict[str, Any]],
     audit_dir: str | Path | None,
     audit_full: bool,
+    trajectory_text: str,
 ) -> dict[str, Any]:
     """Attach the per-episode audit trail to a result record (optional).
 
@@ -246,6 +251,7 @@ def _with_audit(
             "reasoning_trace": result["reasoning_trace"],
             "usage": result.get("usage") or {},
         },
+        trajectory_text=trajectory_text,
         full=audit_full,
     )
     path = write_audit(record, Path(audit_dir))
@@ -494,7 +500,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--episode-ids", default=None, help="Comma-separated episode ids to run")
     parser.add_argument("--samples", type=int, default=None, help="Random sample of N episodes (seeded)")
     parser.add_argument("--output", default="results/novacode_results.jsonl", help="Results JSONL output path")
-    parser.add_argument("--max-tokens", type=int, default=4096, help="Max output tokens per LLM call")
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Max output tokens per LLM call (default: NOVACODE_MAX_TOKENS from env/.env)",
+    )
     parser.add_argument(
         "--batch",
         action="store_true",

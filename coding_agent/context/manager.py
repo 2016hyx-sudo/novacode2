@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..llm.base import Message, ToolCall
+from ..llm.base import Message, ToolCall, raw_content_reasoning_blocks
 from ..tools.base import ToolResult, format_tool_result_for_llm
 
 
@@ -96,13 +96,14 @@ class ContextManager:
                     total += len(json.dumps(call.arguments, ensure_ascii=False)) // 4 + 1
                 except TypeError:
                     total += 4
-            # Replayed raw blocks (thinking, tool_use) are also input tokens.
-            if message.raw_content:
-                for block in message.raw_content:
-                    try:
-                        total += len(json.dumps(block, ensure_ascii=False)) // 4 + 1
-                    except TypeError:
-                        total += 4
+            # Replayed reasoning/thinking blocks are also input tokens. Text
+            # and tool_use parts are already counted above and must not be
+            # repeated (raw_content shape differs per provider).
+            for block in raw_content_reasoning_blocks(message):
+                try:
+                    total += len(json.dumps(block, ensure_ascii=False)) // 4 + 1
+                except TypeError:
+                    total += 4
         return total
 
     def _trim(self) -> None:

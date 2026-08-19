@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "dataset_version": "2026-08-19.1",
+  "mode": "offline",
+  "sample": {
+    "tasks": 15,
+    "main_requests": 278,
+    "fold_requests": 37
+  },
+  "context": {
+    "crr_weighted": 0.8693803091875117,
+    "net_crr": 0.8496050326466618,
+    "tool_reduction": 0.6694932856632563,
+    "fold_incremental": 0.6047895998887222
+  },
+  "input_tokens": {
+    "structured": {
+      "count": 278,
+      "max": 32429,
+      "p50": 15783,
+      "p95": 25178
+    },
+    "raw_full": {
+      "count": 278,
+      "max": 421374,
+      "p50": 58294,
+      "p95": 421179
+    }
+  },
+  "metadata": {
+    "baseline_type": "deterministic-synthetic-replay",
+    "token_source": "estimated",
+    "live_provider_baseline": false,
+    "notes": "offline-core-15 adds three reasoning-bearing recipes (anthropic-thinking, openai-reasoning, reasoning+fold)."
+  }
+}

@@ -198,7 +198,7 @@ evals/structured_context/
   data/
     manifest.json            # 数据集版本、bucket 数和 fixture/content profiles
     scenarios.json           # core-30 正式任务、fixture 配方和 oracle
-    offline_cases.json       # offline-core-12 确定性重放配方
+    offline_cases.json       # offline-core-15 确定性重放配方
   fixtures/                  # 固定的小型代码仓库/合成工具输出
   golden_trajectories/       # 脱敏后的事件、archive、artifact manifest
   baselines/
@@ -479,7 +479,8 @@ PR 离线 replay 无随机性，可采用更严格的精确门禁：同一 golde
 
 验收：无 API key 可重复运行；连续两次输出一致；公式与 Artifact 重建测试全绿。
 
-实现状态：默认 `offline-core-12` 生成 238 个确定性 request snapshots，支持三路
+实现状态：默认 `offline-core-15` 生成 278 个确定性 request snapshots（含
+anthropic/openai 两种思考链形态与 reasoning+fold 三条 recipe），支持三路
 重建、CRR/Net CRR/p50/p95、逐请求 baseline gate，以及原子 JSONL/JSON/Markdown
 报告；PR workflow 不使用 API key 或网络。合成 replay 与生产链路共享 Tool Result
 compressor，并统一执行 recipe assertions；Fold/State 压力仍由确定性 recipe

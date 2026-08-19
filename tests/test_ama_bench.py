@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ama_bench.extract import extract_final_answer, parse_answer_blocks
-from ama_bench.fold import NovaCodeMemoryBuilder
+from ama_bench.fold import BuilderConfig, NovaCodeMemoryBuilder
 from ama_bench.retrieve import render_evidence, score_candidates
 from ama_bench.steps import parse_trajectory_text, steps_to_text
 
@@ -67,6 +67,50 @@ def test_memory_construction_empty() -> None:
     memory = NovaCodeMemoryBuilder().build([], task="nothing")
     assert memory.stats["steps"] == 0
     assert len(memory.trajectory.groups) == 0
+
+
+def _large_trajectory(n: int) -> str:
+    parts = []
+    for i in range(n):
+        parts.append(
+            f"Step {i}:\n"
+            f"Action: navigate(room=room{i % 5})\n"
+            f"Observation: You are in room {i % 5}. Item number {i} is here.\n"
+        )
+    return "\n".join(parts)
+
+
+def test_fold_all_compresses_to_target_ratio() -> None:
+    """The single compression ratio drives the residual to (near) its target.
+
+    The deterministic fold is ~3:1 here, so the folded state alone is already
+    > 30% of the trajectory; the builder folds as far as it can and the
+    residual lands just above the target.  The LLM-assisted fold (compact
+    state) lands at or under it via the recent-window retention.
+    """
+    steps = parse_trajectory_text(_large_trajectory(60))
+    builder = NovaCodeMemoryBuilder()
+    memory = builder.build(steps, task="collect items")
+    stats = memory.stats
+    residual = stats["post_fold_tokens"] / stats["pre_fold_tokens"]
+    assert residual <= builder.config.fold_target_ratio + 0.08
+    # Meaningfully compressed vs. keeping the whole trajectory.
+    assert residual < 0.5
+    # Accounting invariant: every group is either folded or kept verbatim.
+    assert stats["groups"] == stats["groups_folded"] + stats["groups_kept"]
+    assert stats["groups_kept"] >= 1
+
+
+def test_fold_all_recent_window_scales_with_ratio() -> None:
+    """A higher target ratio keeps more of the recent trajectory verbatim."""
+    steps = parse_trajectory_text(_large_trajectory(60))
+    kept_small = NovaCodeMemoryBuilder(config=BuilderConfig(fold_target_ratio=0.30)).build(
+        steps, task="t"
+    ).stats["groups_kept"]
+    kept_large = NovaCodeMemoryBuilder(config=BuilderConfig(fold_target_ratio=0.80)).build(
+        steps, task="t"
+    ).stats["groups_kept"]
+    assert kept_large > kept_small
 
 
 def test_retrieval_ranks_apple_evidence_first() -> None:

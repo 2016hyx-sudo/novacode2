@@ -71,13 +71,17 @@ writes one audit JSON per episode (see below).
 ### Audit trail (debugging a run)
 
 Each episode gets an audit file `<audit-dir>/<episode_id>.json` (default:
-`<output parent>/audit`) tracing the full pipeline — input trajectory, the
-pre-fold group inventory, every fold epoch (model used, deltas, fallback,
-errors), the post-fold memory summary, per-question retrieval (top-k scores,
-evidence hash), the exact prompt sent, the answer, and per-call usage
-(cache-hit tokens included).  Results records carry `audit_path` plus a compact
-`memory` summary (pre/post-fold tokens, residual ratio, fold counts) so the
-results JSONL alone shows how much each trajectory was compressed.
+`<output parent>/audit`) tracing the full pipeline — the **full pre-compression
+trajectory text** (`pre_fold.trajectory_text`) and **full post-compression
+memory dump** (`memory.post_fold_memory`, i.e. task/tool state + kept groups)
+are ALWAYS recorded, so any episode can be re-evaluated later without rebuilding
+memory.  It also records the pre-fold group inventory, every fold epoch (model
+used, deltas, fallback, errors), the post-fold memory summary, per-question
+retrieval (top-k scores, evidence hash), the exact prompt sent, the answer, and
+per-call usage (cache-hit tokens included).  Results records carry `audit_path`
+plus a compact `memory` summary (pre/post-fold tokens, residual ratio, fold
+counts) so the results JSONL alone shows how much each trajectory was
+compressed.
 
 ```bash
 python -m ama_bench.run \
@@ -88,11 +92,13 @@ python -m ama_bench.run \
   --audit-full          # full pre-fold groups, evidence and prompts
 ```
 
-`--audit-full` records full content (larger files; also implies
-`--keep-work-dir` so `groups.jsonl` survives).  Without it the audit stores
-hashes, char counts and scores — enough to spot *where* an answer went wrong
-(memory loss vs retrieval miss vs generation), and the exact content is one
-`--audit-full` re-run away.
+`--audit-full` adds the remaining full content: the full pre-fold group objects
+(from the kept work directory) and per-question full evidence blocks and
+prompts.  It also implies `--keep-work-dir` so `groups.jsonl` survives.  Without
+it, per-question evidence/prompts are stored as hashes and char counts, but the
+**full trajectory text and full post-fold memory are always present** — so
+memory loss vs retrieval miss vs generation failure can always be traced, and
+the heavy per-question detail is one `--audit-full` re-run away.
 
 ### Judge the answers (self-contained LLM-as-judge)
 
@@ -220,9 +226,12 @@ python -m pytest tests/test_ama_bench.py -q
 ## Notes
 
 * The dataset contains only a test split; there is no training set.
-* The deterministic fold deliberately keeps only the most recent
-  `protected_recent_groups` trajectory groups verbatim; everything older is
-  folded into Task/Tool State, which is exactly the behavior the benchmark's
+* The fold compresses the trajectory to `fold_target_ratio` (default 0.30 =
+  30% of the pre-fold size).  It folds the oldest groups first and stops once
+  the post-fold estimate is at or below that target; how many of the most
+  recent groups are kept verbatim is derived from that single ratio (with a
+  `min_recent_groups` safety floor), not from a fixed count.  Everything folded
+  goes into Task/Tool State, which is exactly the behavior the benchmark's
   memory formulation exercises.
 * The benchmark's `run.sh`/vLLM path targets Linux/CUDA; the `api` server
   path works on any platform that can reach the LLM API.

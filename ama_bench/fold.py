@@ -43,6 +43,8 @@ from coding_agent.structured_context.state_merge import (
 )
 from coding_agent.structured_context.token_counter import TokenCounter
 
+from config import LLMConfig
+
 from .memory import NovaCodeMemory
 from .steps import Step
 
@@ -172,9 +174,17 @@ class MemoryBuildStats:
 @dataclass
 class BuilderConfig:
     max_context_tokens: int = 96_000
+    # The offline builder has no trigger timing: it folds the whole trajectory
+    # in one pass.  Kept for config-shape compatibility with the live config,
+    # but never consulted by the builder.
     fold_trigger_ratio: float = 0.70
-    fold_target_ratio: float = 0.45
-    protected_recent_groups: int = 2
+    # Compress the trajectory to this fraction of its pre-fold size (0.30 =
+    # keep 30% of the original).  The number of the most recent groups kept
+    # verbatim is derived from this single ratio, not from a hardcoded count.
+    fold_target_ratio: float = 0.30
+    # Hard floor on how many of the most recent groups stay verbatim, so
+    # retrieval always has a recent window even when the fold is very compact.
+    min_recent_groups: int = 1
     fold_max_input_chars: int = 60_000
     fold_max_attempts: int = 3
     compact_task_budget_tokens: int = 8_000
@@ -193,10 +203,16 @@ class NovaCodeMemoryBuilder:
         fold_provider: LLMProvider | None = None,
         config: BuilderConfig | None = None,
         token_counter: TokenCounter | None = None,
+        fold_reasoning_effort: str | None = None,
     ) -> None:
         self.fold_provider = fold_provider
         self.config = config or BuilderConfig()
         self.token_counter = token_counter or TokenCounter()
+        # Fold is offline summarization: cheap by default, but honor the shared
+        # secondary reasoning effort (NOVACODE_SECONDARY_REASONING_EFFORT) so a
+        # deeper fold can be enabled for quality-sensitive runs.
+        if fold_reasoning_effort is None:
+            fold_reasoning_effort = LLMConfig.from_env().secondary_reasoning_effort or "none"
         self.fold_engine = FoldEngine(
             fold_provider,
             token_counter=self.token_counter,
@@ -204,8 +220,7 @@ class NovaCodeMemoryBuilder:
                 max_attempts=self.config.fold_max_attempts,
                 max_input_chars=self.config.fold_max_input_chars,
             ),
-            # Offline memory building is summarization; skip reasoning there.
-            reasoning_effort="none",
+            reasoning_effort=fold_reasoning_effort,
         )
 
     # ------------------------------------------------------------------ construction
@@ -267,6 +282,7 @@ class NovaCodeMemoryBuilder:
             epoch_id=0,
             event_log=event_log,
             stats=stats,
+            pre_fold_tokens=stats.pre_fold_tokens,
         )
         trajectory = final_trajectory
         task_state = final_task
@@ -326,15 +342,37 @@ class NovaCodeMemoryBuilder:
         epoch_id: int,
         event_log: EventLog,
         stats: MemoryBuildStats,
+        pre_fold_tokens: int,
     ) -> tuple[list[InteractionGroup], int, TaskState, ToolState, Trajectory]:
-        remaining = list(groups)
-        folded_total = 0
-        current_epoch = epoch_id
+        """Fold the trajectory down to ``fold_target_ratio`` of its pre-fold size.
+
+        Phase 1 folds the oldest groups in batches until the post-fold estimate
+        (folded state + remaining recent groups) is at or below the target, or
+        only ``min_recent_groups`` recent groups remain — so how many of the
+        most recent groups are kept verbatim is derived from the single
+        compression ratio instead of a hardcoded count.
+
+        Phase 2: the folded state is usually far more compact than the target,
+        so any headroom is filled by keeping the newest trajectory groups
+        verbatim on top of the state (a precise recent window sized by the
+        ratio).  Those groups still have a distilled entry in the state, which
+        is the layered design; ``folded_total`` is booked as the groups not kept
+        verbatim so ``groups == folded + kept`` still holds.
+        """
         task_dict = task_state.to_dict()
         tool_dict = tool_state.to_dict()
-        while len(remaining) > self.config.protected_recent_groups:
-            # Fold the oldest groups, keeping the most recent ones intact.
-            foldable = remaining[: -self.config.protected_recent_groups]
+        target_tokens = max(1, int(pre_fold_tokens * self.config.fold_target_ratio))
+        group_tokens = [self._group_tokens(group) for group in groups]
+        remaining = list(groups)
+        offset = 0  # groups[:offset] are folded; groups[offset:] are the recent suffix
+        folded_total = 0
+        current_epoch = epoch_id
+
+        # Phase 1: fold the oldest groups until the estimate is at/below target.
+        # Estimates use the same token basis as ``_estimate_memory_tokens`` so
+        # the reported residual respects the ceiling.
+        while len(remaining) > self.config.min_recent_groups:
+            foldable = remaining[: max(1, len(remaining) - self.config.min_recent_groups)]
             if len(foldable) > _MAX_GROUPS:
                 foldable = foldable[:_MAX_GROUPS]
             task_state = TaskState.from_dict(task_dict)
@@ -352,20 +390,59 @@ class NovaCodeMemoryBuilder:
             tool_dict = result["tool_dict"]
             stats.fold_events.append(self._fold_event(current_epoch + 1, len(foldable), result["fold_result"]))
             remaining = remaining[len(foldable) :]
+            offset += len(foldable)
             folded_total += len(foldable)
             current_epoch += 1
+            estimate = self._estimate_state_tokens(
+                TaskState.from_dict(task_dict), ToolState.from_dict(tool_dict)
+            ) + sum(group_tokens[offset:])
+            if estimate <= target_tokens:
+                break
+
+        # Phase 2: fill any headroom with a verbatim recent window.
+        state_tokens = self._estimate_state_tokens(
+            TaskState.from_dict(task_dict), ToolState.from_dict(tool_dict)
+        )
+        budget = target_tokens - state_tokens
+        if budget > 0:
+            kept: list[InteractionGroup] = []
+            kept_tokens = 0
+            for group, tokens in zip(reversed(groups), reversed(group_tokens)):
+                if kept_tokens + tokens > budget and kept:
+                    break
+                kept.append(group)
+                kept_tokens += tokens
+            if kept:
+                kept = list(reversed(kept))
+                remaining = kept
+                offset = len(groups) - len(kept)
+                folded_total = max(0, len(groups) - len(kept))
+
         task_state = TaskState.from_dict(task_dict)
         tool_state = ToolState.from_dict(tool_dict)
         trajectory = Trajectory(epoch_id=current_epoch)
         trajectory.groups = remaining
         return remaining, folded_total, task_state, tool_state, trajectory
 
-    def _estimate_memory_tokens(self, task_state: TaskState, tool_state: ToolState, trajectory: Trajectory) -> int:
-        """Estimated tokens of the post-fold memory (state + kept trajectory)."""
+    def _group_tokens(self, group: InteractionGroup) -> int:
+        """Estimated tokens of one trajectory group, same json-dump basis as
+        ``pre_fold_tokens`` so the ratio sizing is consistent end to end."""
+        return self.token_counter.estimate_text(
+            json.dumps(group.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        )
+
+    def _estimate_state_tokens(self, task_state: TaskState, tool_state: ToolState) -> int:
+        """Estimated tokens of the folded task/tool state (same basis as the
+        final ``_estimate_memory_tokens``, so the ratio ceiling is respected)."""
         task_text = json.dumps(task_state.to_dict(), ensure_ascii=False, separators=(",", ":"))
         tool_text = json.dumps(tool_state.to_dict(), ensure_ascii=False, separators=(",", ":"))
-        recent_groups = sum(self.token_counter.estimate_messages(group.messages) for group in trajectory.groups)
-        return self.token_counter.estimate_text(task_text) + self.token_counter.estimate_text(tool_text) + recent_groups
+        return self.token_counter.estimate_text(task_text) + self.token_counter.estimate_text(tool_text)
+
+    def _estimate_memory_tokens(self, task_state: TaskState, tool_state: ToolState, trajectory: Trajectory) -> int:
+        """Estimated tokens of the post-fold memory (state + kept trajectory),
+        all on the same json-dump basis as ``pre_fold_tokens``."""
+        recent_groups = sum(self._group_tokens(group) for group in trajectory.groups)
+        return self._estimate_state_tokens(task_state, tool_state) + recent_groups
 
     @staticmethod
     def _fold_event(epoch: int, groups_folded: int, fold_result: FoldResult) -> dict[str, Any]:

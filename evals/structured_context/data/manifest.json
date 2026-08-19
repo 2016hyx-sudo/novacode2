@@ -1,10 +1,10 @@
 {
   "schema_version": "1.0",
   "dataset_id": "novacode-structured-context-core-30",
-  "dataset_version": "2026-08-18.1",
+  "dataset_version": "2026-08-19.1",
   "description": "Deterministic data definitions for offline context replay and full-run structured-context evaluation.",
   "scenario_count": 30,
-  "offline_case_count": 12,
+  "offline_case_count": 15,
   "bucket_counts": {
     "short-control": 4,
     "tool-output-heavy": 6,

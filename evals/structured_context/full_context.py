@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from coding_agent.llm.base import Message, ToolCall, ToolSchema
+from coding_agent.llm.base import Message, ToolCall, ToolSchema, raw_content_reasoning_blocks
 from coding_agent.llm.usage import request_payload_hash
 from coding_agent.structured_context.structured_context import (
     TOOL_OUTPUT_CAPS,
@@ -278,12 +278,14 @@ def reconstruct_prompt_variants(
         "stable_prefix": stable_prefix,
         "tools": tool_tokens,
         "recent_trajectory": counter.estimate_messages(raw_history),
+        "reasoning": _reasoning_tokens(raw_history, counter),
     }
     raw_layers["total"] = counter.estimate_prompt(system_text="", tools=parsed_tools, messages=raw_messages)
     observation_layers = {
         "stable_prefix": stable_prefix,
         "tools": tool_tokens,
         "recent_trajectory": counter.estimate_messages(observation_history),
+        "reasoning": _reasoning_tokens(observation_history, counter),
     }
     observation_layers["total"] = counter.estimate_prompt(
         system_text="", tools=parsed_tools, messages=observation_messages
@@ -296,18 +298,18 @@ def reconstruct_prompt_variants(
         (message for message in reversed(structured) if message.role == "user" and (message.content or "").startswith("<agent_state>")),
         None,
     )
+    structured_trajectory = [
+        message
+        for message in structured
+        if message is not structured[0] and message is not state_message and message is not agent_message
+    ]
     structured_layers = {
         "stable_prefix": stable_prefix,
         "tools": tool_tokens,
         "task_tool_state": counter.estimate_message(state_message) if state_message else 0,
         "agent_state": counter.estimate_message(agent_message) if agent_message else 0,
-        "recent_trajectory": counter.estimate_messages(
-            [
-                message
-                for message in structured
-                if message is not structured[0] and message is not state_message and message is not agent_message
-            ]
-        ),
+        "recent_trajectory": counter.estimate_messages(structured_trajectory),
+        "reasoning": _reasoning_tokens(structured_trajectory, counter),
     }
     structured_layers["total"] = counter.estimate_prompt(system_text="", tools=parsed_tools, messages=structured)
     return {
@@ -413,6 +415,65 @@ def _content(
             return ""
         return (unit * (length // len(unit) + 1))[:length]
     return fill(before_chars) + marker + fill(available - before_chars)
+
+
+def _thinking_text(
+    case_id: str,
+    group_index: int,
+    *,
+    chars: int,
+    unicode: bool,
+    seed: int,
+) -> str:
+    """Deterministic chain-of-thought text with a recoverable marker."""
+    chars = max(1, int(chars))
+    marker = f"\n<<<THINKING:{case_id}:{group_index:04d}>>>\n"
+    unit = (
+        "推理链中的确定性思考过程：路径/測試/文件.py，こんにちは。\n"
+        if unicode
+        else "deterministic chain-of-thought reasoning step; keep context coherent.\n"
+    )
+    if unit:
+        unit = chr(ord("A") + seed % 26) + unit[1:]
+    if chars <= len(marker):
+        return marker[:chars]
+    available = chars - len(marker)
+    def fill(length: int) -> str:
+        if length <= 0:
+            return ""
+        return (unit * (length // len(unit) + 1))[:length]
+    before = min(available, int(available * 0.50))
+    return fill(before) + marker + fill(available - before)
+
+
+def _message_reasoning_text(message: Message) -> str:
+    """Join every reasoning/thinking block of one message as searchable text."""
+    return "\n".join(
+        json.dumps(block, ensure_ascii=False, separators=(",", ":"))
+        for block in raw_content_reasoning_blocks(message)
+    )
+
+
+def _reasoning_tokens(messages: Sequence[Message], counter: TokenCounter) -> int:
+    """Sum the token estimate contributed only by reasoning/thinking blocks."""
+    total = 0
+    for message in messages:
+        for block in raw_content_reasoning_blocks(message):
+            try:
+                total += counter.estimate_text(
+                    json.dumps(block, ensure_ascii=False, separators=(",", ":"))
+                )
+            except TypeError:
+                total += 4
+    return total
+
+
+def _reasoning_plan(generator: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the optional ``reasoning`` recipe section, or an empty mapping."""
+    reasoning = generator.get("reasoning")
+    if not isinstance(reasoning, Mapping):
+        return {}
+    return {str(key): value for key, value in reasoning.items()}
 
 
 def _compress_observation(raw: str, *, tool: str, artifact_id: str, counter: TokenCounter) -> str:
@@ -662,6 +723,7 @@ def _make_group(
     artifacts: dict[str, bytes],
     counter: TokenCounter,
     pressure_chars: int | None,
+    reasoning: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     case_id = str(case["id"])
     generator = dict(case.get("generator") or {})
@@ -675,7 +737,35 @@ def _make_group(
         tool = str(spec.get("tool", "read_file"))
         call_id = f"{case_id}-c-{group_index:04d}-{offset:02d}"
         calls.append(ToolCall(id=call_id, name=tool, arguments={"fixture_group": group_index}))
-    messages.append(Message(role="assistant", content=None if calls else "continue", tool_calls=calls))
+    if reasoning:
+        mode = str(reasoning.get("mode", "anthropic-thinking"))
+        chars = max(1, int(reasoning.get("chars_each", 800) or 800))
+        unicode = bool(reasoning.get("unicode", False))
+        thinking = _thinking_text(
+            case_id,
+            group_index,
+            chars=chars,
+            unicode=unicode,
+            seed=int(generator.get("seed", 0)),
+        )
+        if mode == "openai-reasoning":
+            raw_content: Any = {
+                "content": None,
+                "reasoning_content": thinking,
+                "tool_calls": [call.to_dict() for call in calls],
+            }
+        else:
+            raw_content = [{"type": "thinking", "thinking": thinking}]
+        messages.append(
+            Message(
+                role="assistant",
+                content=None if calls else "continue",
+                tool_calls=calls,
+                raw_content=raw_content,
+            )
+        )
+    else:
+        messages.append(Message(role="assistant", content=None if calls else "continue", tool_calls=calls))
     for offset, (call, spec) in enumerate(zip(calls, specs)):
         chars = int(spec.get("chars_each", 1_200) or 1_200)
         if group_index == _recipe_group_count(generator) and isinstance(generator.get("last_group"), Mapping):
@@ -855,6 +945,32 @@ def _validate_recipe_assertions(
                 passed = False
         elif kind == "reported_and_estimated_tokens_kept_separate":
             passed = all(item.metric.token_source == "estimated" for item in requests)
+        elif kind == "reasoning_blocks_present":
+            passed = any(
+                _message_reasoning_text(_as_message(message))
+                for group in groups
+                for message in group.get("messages") or []
+            )
+        elif kind == "reasoning_marker_in_thinking":
+            marker = f"<<<THINKING:{case.get('id')}:"
+            passed = any(
+                marker in _message_reasoning_text(_as_message(message))
+                for group in groups
+                for message in group.get("messages") or []
+            )
+        elif kind == "reasoning_in_all_variants":
+            passed = bool(requests) and all(
+                item.variants.get("raw_full") is not None
+                and item.variants["raw_full"].layers.get("reasoning", 0) > 0
+                and item.variants["observation_full"].layers.get("reasoning", 0) > 0
+                and item.variants["structured"].layers.get("reasoning", 0) > 0
+                for item in requests
+            )
+        elif kind == "reasoning_archived_on_fold":
+            final = requests[-1]
+            raw_reasoning = final.variants["raw_full"].layers.get("reasoning", 0)
+            structured_reasoning = final.variants["structured"].layers.get("reasoning", 0)
+            passed = bool(fold_events) and raw_reasoning > structured_reasoning > 0
         else:
             raise ReplayError(f"offline case {case.get('id')} has unsupported assertion {kind!r}")
         if not passed:
@@ -911,6 +1027,7 @@ def materialize_offline_case(
             artifacts=artifacts,
             counter=counter,
             pressure_chars=pressure,
+            reasoning=_reasoning_plan(generator),
         )
         all_groups.append(group)
         retained.append(group)
@@ -1124,7 +1241,7 @@ def run_offline_replay(
         requests=requests,
         tasks=tuple({"id": case_id, "status": "materialized"} for case_id in case_ids),
         manifest={
-            "suite": "offline-core-12",
+            "suite": "offline-core-15",
             "source": str(path or DEFAULT_OFFLINE_CASES),
             "network_allowed": False,
             "model_calls": 0,
