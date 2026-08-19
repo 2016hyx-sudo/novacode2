@@ -33,10 +33,37 @@ def _brief(value: Any, limit: int = 140) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+# Collapsed thinking summary length shown inline in llm_response. The full
+# reasoning text is kept and expanded on demand via /think.
+THINKING_PREVIEW_LIMIT = 180
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a 1/true/yes/on style boolean from the environment."""
+    value = os.environ.get(name, "")
+    if not value.strip():
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class TUI:
-    def __init__(self, console: Console | None = None) -> None:
+    def __init__(
+        self,
+        console: Console | None = None,
+        *,
+        show_thinking: bool | None = None,
+    ) -> None:
         self.console = console or Console()
         self._last_subagent_depth = 0
+        # Reasoning/thinking preview in llm_response. Defaults to
+        # NOVACODE_SHOW_THINKING; callers may override programmatically.
+        self.show_thinking = (
+            _env_bool("NOVACODE_SHOW_THINKING") if show_thinking is None else show_thinking
+        )
+        # Full thinking blocks recorded on llm_response, expanded via /think.
+        self._thinking_blocks: list[str] = []
+        # True while the interactive command loop is running (/think hint).
+        self._interactive = False
 
     # ------------------------------------------------------------- event sink
 
@@ -78,9 +105,17 @@ class TUI:
                 Text(f"[llm] retry {data.get('attempt')}: {_brief(data.get('error'))}", style="yellow")
             )
         elif kind == "llm_response":
-            tool_names = data.get("tool_calls") or []
-            if tool_names:
-                return
+            thinking = (data.get("thinking") or "").strip()
+            if self.show_thinking and thinking:
+                # Collapsed reasoning summary, dim so it never drowns the final
+                # answer. The full text is kept and expanded via /think in
+                # interactive mode. Shown even on tool-call turns.
+                self._thinking_blocks.append(thinking)
+                preview = _brief(thinking, THINKING_PREVIEW_LIMIT)
+                hint = "  (/think to expand)" if self._interactive and preview.endswith("…") else ""
+                self.console.print(Text(f"[thinking] {preview}{hint}", style="dim yellow"))
+            # The assistant message text accompanies tool calls too; show it
+            # instead of jumping straight to the tool call.
             text = data.get("text") or ""
             if text.strip():
                 self.console.print(Text("Agent:", style="bold green"))
@@ -147,6 +182,15 @@ class TUI:
         elif kind == "error":
             self.console.print(Text(f"[error] {_brief(data.get('error'))}", style="red"))
 
+    def _show_thinking(self) -> None:
+        """Expand all recorded thinking blocks in full (/think)."""
+        if not self._thinking_blocks:
+            self.console.print(Text("No thinking recorded.", style="dim"))
+            return
+        for block in self._thinking_blocks:
+            self.console.print(Text("[thinking]", style="bold yellow"))
+            self.console.print(Text(block, style="dim yellow"))
+
     def _ask(self) -> str:
         """Read one line with a Unicode-safe, readline-aware prompt.
 
@@ -172,9 +216,10 @@ class TUI:
         return self.run_task(harness, session, task)
 
     def run_interactive(self, harness: Any, session_id: str | None = None) -> None:
+        self._interactive = True
         self.console.print(
             Panel(
-                "Type a coding task. Commands: /new /session /plan /exit",
+                "Type a coding task. Commands: /new /session /plan /think /exit",
                 title="NovaCode",
                 border_style="blue",
             )
@@ -213,8 +258,10 @@ class TUI:
                     else:
                         body = "\n".join(f"  {i}. {step}" for i, step in enumerate(session.plan, 1))
                         self.console.print(Panel(body, title="Current Plan", border_style="magenta"))
+                elif task == "/think":
+                    self._show_thinking()
                 else:
-                    self.console.print(Text("Commands: /new /session /plan /exit", style="dim"))
+                    self.console.print(Text("Commands: /new /session /plan /think /exit", style="dim"))
                 continue
             if session is None:
                 session = harness.new_session(task)

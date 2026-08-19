@@ -83,6 +83,7 @@ All supported variables:
 | `NOVACODE_MAX_TOKENS` | max output tokens per LLM response; thinking/reasoning tokens share this budget with the final text |
 | `NOVACODE_REASONING_EFFORT` | main-agent thinking effort: `none` \| `low` \| `high` \| `max` (empty = provider default, thinking on) |
 | `NOVACODE_SECONDARY_REASONING_EFFORT` | effort for subagents and context folding (default `none`) |
+| `NOVACODE_SHOW_THINKING` | `1/true/yes/on` shows reasoning/thinking in the TUI, collapsed to a one-line summary (expand with `/think` in interactive mode; default off) |
 | `OPENAI_API_KEY` | OpenAI key |
 | `ANTHROPIC_API_KEY` | Anthropic key |
 | `NOVACODE_API_KEY` | generic key for the selected provider |
