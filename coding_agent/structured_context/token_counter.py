@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..llm.base import Message, ToolSchema
+from ..llm.base import Message, ToolSchema, raw_content_reasoning_blocks
 from ..llm.usage import normalize_usage
 
 
@@ -71,12 +71,13 @@ class TokenCounter:
                 total += cls.estimate_text(json.dumps(call.arguments, ensure_ascii=False, separators=(",", ":")))
             except TypeError:
                 total += 4
-        if message.raw_content:
-            for block in message.raw_content:
-                try:
-                    total += cls.estimate_text(json.dumps(block, ensure_ascii=False, separators=(",", ":")))
-                except TypeError:
-                    total += 4
+        # Replayed reasoning/thinking blocks are also input tokens; text and
+        # tool_use parts are already counted above and must not be repeated.
+        for block in raw_content_reasoning_blocks(message):
+            try:
+                total += cls.estimate_text(json.dumps(block, ensure_ascii=False, separators=(",", ":")))
+            except TypeError:
+                total += 4
         return total
 
     @classmethod

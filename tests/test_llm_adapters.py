@@ -284,6 +284,41 @@ def test_openai_parses_reasoning_and_replays(monkeypatch):
     assert calls2[0]["messages"][1] == result.raw_content
 
 
+def test_openai_preserves_empty_reasoning_content(monkeypatch):
+    # DeepSeek V4 returns reasoning_content as an empty string on some tool
+    # turns; it must still be echoed back verbatim or the API returns a 400.
+    config = LLMConfig(provider="openai", model="deepseek-v4-flash", max_tokens=2000)
+    response = SimpleNamespace(
+        choices=[
+            openai_choice(
+                content="",
+                tool_calls=[openai_tool_call("c1", "read_file", '{"path": "a.py"}')],
+                reasoning_content="",
+            )
+        ],
+        usage=None,
+    )
+    fake_client, calls = make_openai_client(response)
+    monkeypatch.setattr(openai_mod.openai, "OpenAI", fake_client)
+    result = openai_mod.OpenAIProvider(config).chat([Message(role="user", content="read a.py")])
+    assert result.raw_content["reasoning_content"] == ""
+
+    history = [
+        Message(role="user", content="read a.py"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[ToolCall(id="c1", name="read_file", arguments={"path": "a.py"})],
+            raw_content=result.raw_content,
+        ),
+        Message(role="tool", content="ok", tool_call_id="c1", name="read_file"),
+    ]
+    fake2, calls2 = make_openai_client(SimpleNamespace(choices=[openai_choice()], usage=None))
+    monkeypatch.setattr(openai_mod.openai, "OpenAI", fake2)
+    openai_mod.OpenAIProvider(config).chat(history)
+    assert calls2[0]["messages"][1]["reasoning_content"] == ""
+
+
 def test_openai_reasoning_effort_params(monkeypatch):
     config = LLMConfig(provider="openai", model="deepseek-v4-flash", max_tokens=2000)
     fake_client, calls = make_openai_client(
@@ -349,3 +384,80 @@ def test_context_manager_counts_raw_content(monkeypatch):
     with_raw = ContextManager.estimate_tokens(manager.messages)
     # Raw thinking text (400 chars ~ 101 tokens) is counted on top of content.
     assert with_raw > plain + 50
+
+
+def test_context_manager_counts_openai_reasoning(monkeypatch):
+    # OpenAI raw_content is a dict, not a block list; reasoning_content must
+    # be counted rather than iterating the dict keys (the old bug).
+    from coding_agent.context.manager import ContextManager
+
+    manager = ContextManager("sys", max_context_tokens=1_000_000)
+    manager.add_assistant(
+        "hello world",
+        raw_content={
+            "role": "assistant",
+            "content": "hello world",
+            "reasoning_content": "deep " + "x" * 400,
+        },
+    )
+    plain = ContextManager.estimate_tokens([Message(role="assistant", content="hello world")])
+    with_raw = ContextManager.estimate_tokens(manager.messages)
+    assert with_raw > plain + 50
+
+
+# ------------------------------------------------------ token estimation
+
+
+def test_token_counter_counts_openai_reasoning():
+    from coding_agent.llm.base import ToolCall
+    from coding_agent.structured_context.token_counter import TokenCounter
+
+    content = "answer text here " * 20
+    reasoning = "deep thinking " + "x" * 300
+    with_reasoning = Message(
+        role="assistant",
+        content=content,
+        raw_content={"role": "assistant", "content": content, "reasoning_content": reasoning},
+    )
+    no_reasoning = Message(role="assistant", content=content)
+    delta = TokenCounter.estimate_message(with_reasoning) - TokenCounter.estimate_message(no_reasoning)
+    # Reasoning text (~300 chars) is actually counted now, not the dict keys.
+    assert delta > 30
+
+    # raw_content.tool_calls duplicate Message.tool_calls and add nothing.
+    tc = ToolCall(id="c1", name="read", arguments={"path": "a.py"})
+    with_raw_tools = Message(
+        role="assistant",
+        content="",
+        tool_calls=[tc],
+        raw_content={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "read", "arguments": '{"path": "a.py"}'}}
+            ],
+        },
+    )
+    only_message_tools = Message(role="assistant", content="", tool_calls=[tc])
+    assert TokenCounter.estimate_message(with_raw_tools) == TokenCounter.estimate_message(only_message_tools)
+
+
+def test_token_counter_anthropic_text_block_not_double_counted():
+    from coding_agent.structured_context.token_counter import TokenCounter
+
+    text = "the answer " * 30  # ~330 chars
+    thinking = {"type": "thinking", "thinking": "x" * 400, "signature": "s"}
+    plain = Message(role="assistant", content=text)
+    with_text_block = Message(role="assistant", content=text, raw_content=[{"type": "text", "text": text}])
+    # A text block duplicates Message.content → must not add tokens.
+    assert TokenCounter.estimate_message(with_text_block) == TokenCounter.estimate_message(plain)
+
+    with_thinking = Message(
+        role="assistant",
+        content=text,
+        raw_content=[thinking, {"type": "text", "text": text}],
+    )
+    only_thinking = Message(role="assistant", content=text, raw_content=[thinking])
+    # The thinking block adds tokens; the text block alongside it adds nothing.
+    assert TokenCounter.estimate_message(with_thinking) > TokenCounter.estimate_message(plain) + 50
+    assert TokenCounter.estimate_message(with_thinking) == TokenCounter.estimate_message(only_thinking)

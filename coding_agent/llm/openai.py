@@ -75,15 +75,18 @@ class OpenAIProvider:
 
         # Keep the assistant message verbatim (content, tool_calls,
         # reasoning_content) so reasoning is replayed in multi-turn tool loops.
+        reasoning = getattr(message, "reasoning_content", None)
         raw_content: dict[str, Any] | None = None
-        if message.tool_calls or getattr(message, "reasoning_content", None):
+        if message.tool_calls or reasoning is not None:
             raw_content = {"role": "assistant"}
             if message.content is not None:
                 raw_content["content"] = message.content
             if message.tool_calls:
                 raw_content["tool_calls"] = [item.model_dump() for item in message.tool_calls]
-            reasoning = getattr(message, "reasoning_content", None)
-            if reasoning:
+            # DeepSeek thinking mode requires reasoning_content echoed back
+            # verbatim — even an empty string — or the next request returns a
+            # 400. Presence check, not truthiness, so "" is preserved.
+            if reasoning is not None:
                 raw_content["reasoning_content"] = reasoning
 
         usage = {}

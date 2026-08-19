@@ -90,6 +90,29 @@ class Message:
         )
 
 
+def raw_content_reasoning_blocks(message: Message) -> list[Any]:
+    """Extra reasoning/thinking parts carried only by ``Message.raw_content``.
+
+    ``raw_content`` is provider-shaped: Anthropic adapters store a list of
+    content blocks (thinking/text/tool_use); OpenAI adapters store a single
+    assistant dict (content + reasoning_content + tool_calls). The text and
+    tool_use parts duplicate ``Message.content`` / ``Message.tool_calls`` and
+    are already counted elsewhere, so only the thinking/reasoning parts should
+    be added to token estimates.
+    """
+    raw = message.raw_content
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [block for block in raw if isinstance(block, dict) and block.get("type") == "thinking"]
+    if isinstance(raw, dict):
+        reasoning = raw.get("reasoning_content")
+        if reasoning is None:
+            return []
+        return [reasoning]
+    return []
+
+
 @dataclass
 class LLMResponse:
     """Provider-neutral model response."""
