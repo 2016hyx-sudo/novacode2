@@ -179,9 +179,17 @@ class BuilderConfig:
     # but never consulted by the builder.
     fold_trigger_ratio: float = 0.70
     # Compress the trajectory to this fraction of its pre-fold size (0.30 =
-    # keep 30% of the original).  The number of the most recent groups kept
-    # verbatim is derived from this single ratio, not from a hardcoded count.
+    # keep 30% of the original).  The target is an interval centered on this
+    # ratio (see ``fold_tolerance``), not an exact ceiling, so the builder
+    # stops as soon as the estimate lands inside it.  The number of the most
+    # recent groups kept verbatim is derived from this single ratio, not from
+    # a hardcoded count.
     fold_target_ratio: float = 0.30
+    # Acceptable deviation from ``fold_target_ratio`` (e.g. 0.05 = the
+    # post-fold size may land anywhere in [0.25, 0.35] of the pre-fold size).
+    # Prevents a second fold batch from being spent on the last few percent
+    # when the estimate is already close to the target.
+    fold_tolerance: float = 0.05
     # Hard floor on how many of the most recent groups stay verbatim, so
     # retrieval always has a recent window even when the fold is very compact.
     min_recent_groups: int = 1
@@ -344,37 +352,65 @@ class NovaCodeMemoryBuilder:
         stats: MemoryBuildStats,
         pre_fold_tokens: int,
     ) -> tuple[list[InteractionGroup], int, TaskState, ToolState, Trajectory]:
-        """Fold the trajectory down to ``fold_target_ratio`` of its pre-fold size.
+        """Fold the trajectory into the target interval around ``fold_target_ratio``.
 
-        Phase 1 folds the oldest groups in batches until the post-fold estimate
-        (folded state + remaining recent groups) is at or below the target, or
-        only ``min_recent_groups`` recent groups remain — so how many of the
-        most recent groups are kept verbatim is derived from the single
-        compression ratio instead of a hardcoded count.
+        The target is an interval — ``fold_target_ratio * (1 ± fold_tolerance)``
+        of the pre-fold size — so the builder stops as soon as the post-fold
+        estimate lands inside it instead of grinding toward an exact ratio.
 
-        Phase 2: the folded state is usually far more compact than the target,
-        so any headroom is filled by keeping the newest trajectory groups
-        verbatim on top of the state (a precise recent window sized by the
-        ratio).  Those groups still have a distilled entry in the state, which
-        is the layered design; ``folded_total`` is booked as the groups not kept
-        verbatim so ``groups == folded + kept`` still holds.
+        Phase 1 folds only the minimum number of oldest groups each round: the
+        token deficit below the target upper bound is computed from the actual
+        group sizes, and exactly as many oldest groups as cover that deficit
+        are folded (bounded by ``_MAX_GROUPS`` per LLM call).  If the fold
+        state is compact the deficit shrinks after one round and folding stops;
+        if not, the next round takes the next-oldest groups.  Folding stops
+        when the estimate enters the interval, only ``min_recent_groups``
+        groups remain, or nothing foldable is left — never by folding
+        everything and replaying a large suffix.
+
+        Phase 2 compensates only when the fold overshoots (estimate below the
+        interval's lower bound): the newest folded groups are restored verbatim
+        until the estimate reaches the lower bound.  A restored group keeps its
+        distilled entry in the state — the layered design — but is no longer
+        booked as folded, so ``groups == folded + kept`` still holds.
         """
         task_dict = task_state.to_dict()
         tool_dict = tool_state.to_dict()
-        target_tokens = max(1, int(pre_fold_tokens * self.config.fold_target_ratio))
-        group_tokens = [self._group_tokens(group) for group in groups]
+        target_center = max(1, int(pre_fold_tokens * self.config.fold_target_ratio))
+        target_lower = max(1, int(target_center * (1 - self.config.fold_tolerance)))
+        target_upper = max(target_center, int(target_center * (1 + self.config.fold_tolerance)))
+        tokens_by_id = {group.group_id: self._group_tokens(group) for group in groups}
         remaining = list(groups)
-        offset = 0  # groups[:offset] are folded; groups[offset:] are the recent suffix
+        folded_ids: set[str] = set()
         folded_total = 0
         current_epoch = epoch_id
 
-        # Phase 1: fold the oldest groups until the estimate is at/below target.
-        # Estimates use the same token basis as ``_estimate_memory_tokens`` so
-        # the reported residual respects the ceiling.
+        def estimate(state_dict: dict[str, Any]) -> int:
+            return self._estimate_state_tokens(
+                TaskState.from_dict(state_dict), ToolState.from_dict(state_dict)
+            ) + sum(tokens_by_id[group.group_id] for group in remaining)
+
+        # Phase 1: fold only as many oldest groups as the deficit requires.
         while len(remaining) > self.config.min_recent_groups:
-            foldable = remaining[: max(1, len(remaining) - self.config.min_recent_groups)]
+            if estimate(task_dict) <= target_upper:
+                break
+            # The LLM fold delta adds tokens to the state, so folding exactly
+            # the deficit often misses the upper bound by a hair and triggers
+            # a one-group follow-up call.  A 25% margin absorbs the delta and
+            # the estimate lands inside the interval (or slightly below, which
+            # Phase 2 corrects by restoring the newest groups).
+            deficit = int((estimate(task_dict) - target_upper) * 1.25) + 1
+            foldable: list[InteractionGroup] = []
+            deficit_acc = 0
+            for group in remaining[: max(1, len(remaining) - self.config.min_recent_groups)]:
+                foldable.append(group)
+                deficit_acc += tokens_by_id[group.group_id]
+                if deficit_acc >= deficit:
+                    break
             if len(foldable) > _MAX_GROUPS:
                 foldable = foldable[:_MAX_GROUPS]
+            if not foldable:
+                break
             task_state = TaskState.from_dict(task_dict)
             tool_state = ToolState.from_dict(tool_dict)
             result = self._fold_batch(
@@ -389,34 +425,27 @@ class NovaCodeMemoryBuilder:
             task_dict = result["task_dict"]
             tool_dict = result["tool_dict"]
             stats.fold_events.append(self._fold_event(current_epoch + 1, len(foldable), result["fold_result"]))
+            folded_ids.update(group.group_id for group in foldable)
             remaining = remaining[len(foldable) :]
-            offset += len(foldable)
             folded_total += len(foldable)
             current_epoch += 1
-            estimate = self._estimate_state_tokens(
-                TaskState.from_dict(task_dict), ToolState.from_dict(tool_dict)
-            ) + sum(group_tokens[offset:])
-            if estimate <= target_tokens:
-                break
 
-        # Phase 2: fill any headroom with a verbatim recent window.
-        state_tokens = self._estimate_state_tokens(
-            TaskState.from_dict(task_dict), ToolState.from_dict(tool_dict)
-        )
-        budget = target_tokens - state_tokens
-        if budget > 0:
-            kept: list[InteractionGroup] = []
-            kept_tokens = 0
-            for group, tokens in zip(reversed(groups), reversed(group_tokens)):
-                if kept_tokens + tokens > budget and kept:
+        # Phase 2: restore newest folded groups when the fold overshoots.
+        if estimate(task_dict) < target_lower:
+            restore: list[InteractionGroup] = []
+            restored_tokens = 0
+            for group in reversed(groups):
+                if group.group_id not in folded_ids:
+                    continue
+                restore.append(group)
+                restored_tokens += tokens_by_id[group.group_id]
+                if estimate(task_dict) + restored_tokens >= target_lower:
                     break
-                kept.append(group)
-                kept_tokens += tokens
-            if kept:
-                kept = list(reversed(kept))
-                remaining = kept
-                offset = len(groups) - len(kept)
-                folded_total = max(0, len(groups) - len(kept))
+            if restore:
+                restore = list(reversed(restore))
+                remaining = restore + remaining
+                folded_ids.difference_update(group.group_id for group in restore)
+                folded_total = max(0, folded_total - len(restore))
 
         task_state = TaskState.from_dict(task_dict)
         tool_state = ToolState.from_dict(tool_dict)

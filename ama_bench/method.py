@@ -115,6 +115,7 @@ class NovaCodeMemoryMethod(BaseMethod):
         self._builder_config = BuilderConfig(
             max_context_tokens=int(config.get("max_context_tokens", max_context_tokens)),
             fold_max_attempts=int(config.get("fold_max_attempts", fold_max_attempts)),
+            fold_tolerance=float(config.get("fold_tolerance", 0.05)),
             keep_work_dir=bool(config.get("keep_work_dir", keep_work_dir)),
         )
 
