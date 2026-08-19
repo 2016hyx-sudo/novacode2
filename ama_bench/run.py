@@ -500,7 +500,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--episode-ids", default=None, help="Comma-separated episode ids to run")
     parser.add_argument("--samples", type=int, default=None, help="Random sample of N episodes (seeded)")
     parser.add_argument("--output", default="results/novacode_results.jsonl", help="Results JSONL output path")
-    parser.add_argument("--max-tokens", type=int, default=4096, help="Max output tokens per LLM call")
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Max output tokens per LLM call (default: NOVACODE_MAX_TOKENS from env/.env)",
+    )
     parser.add_argument(
         "--batch",
         action="store_true",
