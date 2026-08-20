@@ -15,7 +15,7 @@ from .base import (
 )
 from .filesystem import build_filesystem_tools
 from .registry import ToolRegistry
-from .shell import build_shell_tool
+from .shell import ShellRunner, build_shell_tool
 from .subagent import SubagentTool
 
 
@@ -25,6 +25,7 @@ def build_tool_registry(
     *,
     subagent_tool: SubagentTool | None = None,
     protected_rel: list[str] | None = None,
+    shell_runner: ShellRunner | None = None,
 ) -> ToolRegistry:
     """Build a registry with the standard tools for one agent nesting depth."""
     registry = ToolRegistry()
@@ -36,6 +37,7 @@ def build_tool_registry(
             shell_timeout=constraints.shell_timeout,
             max_output_chars=constraints.max_output_chars,
             protected_names=protected_rel,
+            runner=shell_runner,
         )
     )
     if subagent_tool is not None:
@@ -45,6 +47,7 @@ def build_tool_registry(
 
 __all__ = [
     "FunctionTool",
+    "ShellRunner",
     "SubagentTool",
     "Tool",
     "ToolCallResult",

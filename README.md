@@ -178,6 +178,59 @@ The CLI never constructs a live provider; nightly callers inject one through
 Generated fixtures are trusted local test code: workspace copying, command
 allowlists and hashes are regression isolation, not a hostile-code OS sandbox.
 
+## SWE-bench single-instance evaluation
+
+Install the optional official harness dependencies and ensure Docker is
+available:
+
+```bash
+pip install -e '.[swebench]'
+docker info
+```
+
+If Hugging Face is unreachable from your network, select a reachable mirror
+for both inference and grading commands, for example:
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_HUB_DISABLE_XET=1
+```
+
+Run NovaCode on one SWE-bench Verified instance:
+
+```bash
+python -m evals.swe_bench run \
+  --dataset verified \
+  --instance sympy__sympy-20590 \
+  --output .eval-results/swe-sympy-20590
+```
+
+The adapter keeps NovaCode and provider credentials on the host. It copies the
+official image's pristine `/testbed` repository to an isolated workspace,
+mounts that workspace back into a network-disabled container, and routes only
+`run_shell` through Docker. The agent receives `problem_statement`, never the
+gold `patch`, evaluator `test_patch` or test lists.
+
+The run writes `patch.diff`, `result.json`, traces, and the official
+`predictions.jsonl`. Grade it independently with the SWE-bench harness:
+
+```bash
+swebench eval verified \
+  -p .eval-results/swe-sympy-20590/predictions.jsonl \
+  --run-id novacode-sympy-20590 -j 1
+```
+
+Before model inference, validate the evaluator itself with a reference patch:
+
+```bash
+swebench eval verified --gold \
+  -i sympy__sympy-20590 --run-id validate-gold
+```
+
+Use `--keep-workspace` for debugging, `--no-pull` for an offline run, and
+`--structured-context` to evaluate the structured harness. Runtime state is
+always stored outside the task repository so it cannot leak into the patch.
+
 ## Runtime loop
 
 ```text

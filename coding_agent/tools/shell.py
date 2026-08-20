@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from .base import FunctionTool, ToolErrorKind, ToolResult
 from .workspace import _ensure_workspace
@@ -30,14 +32,67 @@ _DENY_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 
+@dataclass(frozen=True)
+class ShellExecutionResult:
+    """Provider-neutral result of executing one shell command."""
+
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+    cwd: str = ""
+
+
+@runtime_checkable
+class ShellRunner(Protocol):
+    """Execution backend used by :func:`build_shell_tool`."""
+
+    def run(
+        self,
+        command: str,
+        *,
+        workspace: Path,
+        timeout: float,
+    ) -> ShellExecutionResult:
+        """Execute *command* for *workspace* and return captured output."""
+
+
+class LocalShellRunner:
+    """Default backend: execute commands directly in the local workspace."""
+
+    def run(
+        self,
+        command: str,
+        *,
+        workspace: Path,
+        timeout: float,
+    ) -> ShellExecutionResult:
+        completed = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        return ShellExecutionResult(
+            returncode=completed.returncode,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
+            cwd=str(workspace),
+        )
+
+
 def build_shell_tool(
     workspace: Path,
     *,
     shell_timeout: float = 60.0,
     max_output_chars: int = 20_000,
     protected_names: list[str] | None = None,
+    runner: ShellRunner | None = None,
 ) -> FunctionTool:
     root = _ensure_workspace(workspace)
+    shell_runner = runner or LocalShellRunner()
     protected_patterns: list[re.Pattern[str]] = []
     for name in protected_names or []:
         clean = name.strip("/")
@@ -80,14 +135,10 @@ def build_shell_tool(
                 )
 
         try:
-            completed = subprocess.run(
+            completed = shell_runner.run(
                 command,
-                shell=True,
-                cwd=str(root),
-                capture_output=True,
-                text=True,
+                workspace=root,
                 timeout=effective_timeout,
-                check=False,
             )
         except subprocess.TimeoutExpired as exc:
             partial = _truncate(
@@ -123,7 +174,7 @@ def build_shell_tool(
         return ToolResult.ok(
             output or "(command completed successfully with no output)",
             exit_code=0,
-            cwd=str(root),
+            cwd=completed.cwd or str(root),
         )
 
     return FunctionTool(

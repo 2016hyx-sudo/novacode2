@@ -22,6 +22,7 @@ from .runtime.trace import TraceEvent, TraceWriter
 from .runtime.validator import Validator
 from .tools import SubagentTool, ToolRegistry, build_tool_registry
 from .tools.executor import ToolExecutor
+from .tools.shell import ShellRunner
 
 SUBAGENT_SYSTEM_PROMPT = """You are a NovaCode subagent. Complete the single task given by the
 main coding agent and return one concise final report with your findings or changes.
@@ -53,6 +54,7 @@ class Harness:
         session_store: SessionStore,
         planner: Planner | None,
         validator: Validator,
+        shell_runner: ShellRunner | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -60,6 +62,7 @@ class Harness:
         self.session_store = session_store
         self.planner = planner
         self.validator = validator
+        self.shell_runner = shell_runner
         self.workspace = Path(config.workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.budget = RunBudget(
@@ -120,6 +123,7 @@ class Harness:
             self.workspace,
             self.config.constraints,
             subagent_tool=subagent_tool,
+            shell_runner=self.shell_runner,
         )
 
     def _make_subagent_tool(self, depth: int) -> SubagentTool:
@@ -234,11 +238,12 @@ def create_harness(
     config: AgentConfig,
     *,
     listeners: list[Callable[[TraceEvent], None]] | None = None,
+    shell_runner: ShellRunner | None = None,
 ) -> Harness:
     if config.structured_context_enabled:
         from .structured_context.structured_harness import StructuredHarness
 
-        return StructuredHarness(config, listeners=listeners)
+        return StructuredHarness(config, listeners=listeners, shell_runner=shell_runner)
 
     provider = create_provider(config.llm)
     trace = TraceWriter(config.trace_dir, listeners=listeners)
@@ -254,6 +259,7 @@ def create_harness(
         session_store=session_store,
         planner=planner,
         validator=validator,
+        shell_runner=shell_runner,
     )
 
 

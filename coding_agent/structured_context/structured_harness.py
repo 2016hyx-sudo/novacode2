@@ -13,6 +13,7 @@ from ..context.session import SessionStore, new_session_id
 from ..llm.base import LLMProvider
 from ..runtime.trace import TraceEvent, TraceWriter
 from ..tools.executor import ToolExecutor
+from ..tools.shell import ShellRunner
 from .fold_engine import FoldEngine
 from .migration import migrate_legacy_session
 from .models import DriftReport, StructuredSession, canonical_json, sha256_text
@@ -35,6 +36,7 @@ class StructuredHarness(Harness):
         provider: LLMProvider | None = None,
         trace: TraceWriter | None = None,
         listeners: list[Callable[[TraceEvent], None]] | None = None,
+        shell_runner: ShellRunner | None = None,
     ) -> None:
         session_dir, trace_dir = self._resolve_dirs(config)
         self.usage_aggregator = UsageEventAggregator()
@@ -58,6 +60,7 @@ class StructuredHarness(Harness):
             validator=Validator(
                 require_verification_after_edit=config.constraints.require_verification_after_edit
             ),
+            shell_runner=shell_runner,
         )
         self.session_root = session_dir
         self.trace_root = trace_dir
@@ -81,6 +84,7 @@ class StructuredHarness(Harness):
             config.constraints,
             subagent_tool=self._make_subagent_tool(0),
             protected_rel=protected,
+            shell_runner=self.shell_runner,
         )
         self.tools.register(ReadArtifactTool(self._active_artifact_store))
         self.executor = ToolExecutor(
