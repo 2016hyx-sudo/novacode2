@@ -151,6 +151,9 @@ class Constraints:
     require_verification_after_edit: bool = True
 
 
+StorageLocation = Literal["project", "user"]
+
+
 @dataclass
 class AgentConfig:
     """Top-level harness configuration."""
@@ -167,6 +170,8 @@ class AgentConfig:
     # Structured context / checkpoint-resume subsystem.
     structured_context_enabled: bool = False
     agent_dir: Path = field(default_factory=lambda: Path(".agent"))
+    # Storage location strategy: "project" (inside workspace /.agent) or "user" (inside ~/.novacode)
+    storage_location: StorageLocation = "project"
     # ContextManager trim threshold / structured logical window, in estimated tokens.
     max_context_tokens: int = 100_000
     structured_context_window_limit: int = 256_000

@@ -36,6 +36,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--migrate-legacy-session", metavar="SESSION_ID", default=None, help="Migrate one legacy .sessions/<id>.json session to structured storage")
     parser.add_argument("--legacy-session-dir", default=None, help="Directory containing the legacy .sessions/<id>.json file")
     parser.add_argument("--agent-dir", default=None, help="Structured state root (sessions and traces live below it)")
+    parser.add_argument(
+        "--storage-location",
+        choices=["project", "user"],
+        default=None,
+        help="Storage root for sessions, traces, and memories: 'project' (inside workspace/.agent) or 'user' (inside ~/.novacode)",
+    )
+    parser.add_argument("--memory-dir", default=None, help="Project memory storage directory")
+    parser.add_argument("--memory-global-dir", default=None, help="Global memory storage directory")
     parser.add_argument("--env-file", default=None, help="Path to .env file (default: ./.env)")
     return parser.parse_args(argv)
 
@@ -75,7 +83,7 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
     if args.max_steps:
         constraints.max_steps = args.max_steps
 
-    workspace = Path(args.workspace or os.getenv("NOVACODE_WORKSPACE", ".")).expanduser()
+    workspace = Path(args.workspace or os.getenv("NOVACODE_WORKSPACE", ".")).expanduser().resolve()
     planner_enabled = (
         args.planner if args.planner is not None else _truthy(os.getenv("NOVACODE_PLANNER"))
     )
@@ -84,16 +92,41 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
         if args.structured_context is not None
         else _truthy(os.getenv("NOVACODE_STRUCTURED_CONTEXT"))
     )
-    agent_dir = Path(args.agent_dir or os.getenv("NOVACODE_AGENT_DIR", ".agent"))
+
+    storage_location = (
+        args.storage_location
+        or os.getenv("NOVACODE_STORAGE_LOCATION", "project")
+    ).strip().lower()
+    if storage_location not in ("project", "user"):
+        storage_location = "project"
+
+    import hashlib
+    import re
+
+    workspace_clean = re.sub(r"[^a-zA-Z0-9_\-]", "_", workspace.name).strip("_") or "workspace"
+    workspace_slug = f"{workspace_clean}_{hashlib.sha256(str(workspace).encode('utf-8')).hexdigest()[:8]}"
+
     session_explicit = bool(args.session_dir or os.getenv("NOVACODE_SESSION_DIR"))
     trace_explicit = bool(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR"))
-    if structured_context:
-        # --agent-dir is the umbrella switch; explicit session/trace options win.
+
+    if storage_location == "user":
+        user_root = Path.home() / ".novacode" / "projects" / workspace_slug
+        agent_dir = Path(args.agent_dir or os.getenv("NOVACODE_AGENT_DIR") or user_root)
         session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR") or (agent_dir / "sessions"))
         trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR") or (agent_dir / "traces"))
+        memory_project_dir = Path(args.memory_dir or os.getenv("NOVACODE_MEMORY_DIR") or (agent_dir / "memories"))
+        memory_global_dir = Path(args.memory_global_dir or os.getenv("NOVACODE_MEMORY_GLOBAL_DIR") or (Path.home() / ".novacode" / "memories" / "global"))
     else:
-        session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR", ".sessions"))
-        trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR", ".traces"))
+        # project mode
+        agent_dir = Path(args.agent_dir or os.getenv("NOVACODE_AGENT_DIR") or (workspace / ".agent"))
+        if structured_context:
+            session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR") or (agent_dir / "sessions"))
+            trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR") or (agent_dir / "traces"))
+        else:
+            session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR") or (workspace / ".sessions"))
+            trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR") or (workspace / ".traces"))
+        memory_project_dir = Path(args.memory_dir or os.getenv("NOVACODE_MEMORY_DIR") or (agent_dir / "memories"))
+        memory_global_dir = Path(args.memory_global_dir or os.getenv("NOVACODE_MEMORY_GLOBAL_DIR") or (Path.home() / ".novacode" / "memories" / "global"))
 
     return AgentConfig(
         llm=llm,
@@ -106,6 +139,9 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
         trace_dir_explicit=trace_explicit,
         structured_context_enabled=structured_context,
         agent_dir=agent_dir,
+        storage_location=storage_location,  # type: ignore[arg-type]
+        memory_project_dir=memory_project_dir,
+        memory_global_dir=memory_global_dir,
     )
 
 
