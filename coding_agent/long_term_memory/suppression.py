@@ -172,5 +172,8 @@ class SuppressionEngine:
 
     @staticmethod
     def _tokenize(text: str) -> set[str]:
-        words = re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]+", text.lower())
-        return set(words)
+        text = text.lower()
+        en_words = re.findall(r"[a-z0-9_\-]+", text)
+        cn_chars = re.findall(r"[\u4e00-\u9fff]", text)
+        cn_bigrams = [cn_chars[i] + cn_chars[i + 1] for i in range(len(cn_chars) - 1)]
+        return set(en_words + cn_bigrams + cn_chars)

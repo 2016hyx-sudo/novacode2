@@ -127,8 +127,15 @@ class LexicalScorer:
 
     @classmethod
     def _tokenize(cls, text: str) -> set[str]:
-        words = re.findall(r"[a-zA-Z0-9_\u4e00-\u9fff]+", text.lower())
-        return {w for w in words if w not in cls.STOP_WORDS and len(w) > 1}
+        text = text.lower()
+        # 1. English / alphanumeric tokens
+        en_words = re.findall(r"[a-z0-9_\-]+", text)
+        # 2. Chinese characters and 2-grams
+        cn_chars = re.findall(r"[\u4e00-\u9fff]", text)
+        cn_bigrams = [cn_chars[i] + cn_chars[i + 1] for i in range(len(cn_chars) - 1)]
+
+        all_tokens = set(en_words + cn_bigrams + cn_chars)
+        return {w for w in all_tokens if w not in cls.STOP_WORDS and len(w) > 0}
 
 
 class SideQueryEngine:
