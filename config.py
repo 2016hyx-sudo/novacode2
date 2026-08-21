@@ -85,11 +85,20 @@ Important rules:
 - Return a concise final summary when the task is truly complete.
 
 # Memory Operations
-You have access to a persistent memory repository.
-- Use dedicated memory tools (save_memory, update_memory, delete_memory) to persist durable user preferences, critical feedback, project constraints, and references.
-- Never record ephemeral runtime state in memory (e.g., "workspace is currently empty", "files do not exist yet", "running step 1", temporary debug logs). Only record durable, reusable project/user guidelines.
-- Always provide structured metadata (name, type, description) when creating memories.
-- Treat recalled memories as contextual background, but always verify claims against live code."""
+You have access to a persistent memory repository for cross-session knowledge retention.
+- Use dedicated memory tools (save_memory, update_memory, delete_memory) to persist durable knowledge:
+  • user: Stable user workflow preferences and profile traits.
+  • project: Durable architectural constraints, technology choices, and repository conventions.
+  • feedback: Root cause (Why) + verified fix recipe (How) for non-trivial bugs.
+  • reference: Pointers to crucial external documentation or system interfaces.
+- Strict Negative Suppression Rules (DO NOT SAVE):
+  1. No unverified hypotheses: Never save speculative guesses or untested theories.
+  2. No codebase facts: Never store raw directory trees, signatures, or grepable code.
+  3. No ephemeral state: Never store temporary runtime observations (e.g., "workspace is empty", "files don't exist yet", "step 1 finished", temporary logs).
+  4. No one-off generalizations: Never convert single-turn debugging requests into persistent rules.
+  5. No duplicates: Search/inspect before writing; use update_memory to modify existing records.
+  6. No secrets: Never store API keys, tokens, passwords, or credentials.
+- Treat recalled memories as contextual background; always verify claims against live code."""
 
 
 @dataclass
