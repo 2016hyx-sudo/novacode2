@@ -87,6 +87,11 @@ class StructuredHarness(Harness):
             shell_runner=self.shell_runner,
         )
         self.tools.register(ReadArtifactTool(self._active_artifact_store))
+        if config.long_term_memory_enabled and self.memory_store is not None:
+            from ..long_term_memory.tools import create_memory_tools
+
+            for m_tool in create_memory_tools(self.memory_store, is_subagent=False):
+                self.tools.register(m_tool)
         self.executor = ToolExecutor(
             self.tools,
             max_retries=config.constraints.tool_max_retries,
@@ -172,6 +177,11 @@ class StructuredHarness(Harness):
             status="running",
         )
         self.structured_store.save_context(context, checkpoint_kind="post_fold")
+        if self.config.long_term_memory_enabled and self.memory_store is not None:
+            from ..long_term_memory.hook import MemoryLifecycleHook
+
+            hook = MemoryLifecycleHook(self.memory_store)
+            hook.on_fold(context.task_state, context.tool_state)
 
     def _lock(self, session_id: str) -> SessionLock:
         return SessionLock(self.session_root, session_id)
@@ -359,6 +369,11 @@ class StructuredHarness(Harness):
 
         checkpoint_kind = "terminal" if result.status in {"completed", "failed", "stopped"} else "periodic"
         checkpoint = self.structured_store.save_context(context, checkpoint_kind=checkpoint_kind)
+        if checkpoint_kind == "terminal" and self.config.long_term_memory_enabled and self.memory_store is not None:
+            from ..long_term_memory.hook import MemoryLifecycleHook
+
+            hook = MemoryLifecycleHook(self.memory_store)
+            hook.on_session_end(context.task_state, context.tool_state)
 
         self.trace.emit(
             "run_finished",

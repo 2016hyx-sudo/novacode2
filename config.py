@@ -82,7 +82,13 @@ Important rules:
 - Only access files inside the workspace.
 - After modifying code, run an appropriate verification command before declaring success.
 - If a tool fails, read the error message, diagnose the cause, and change your approach.
-- Return a concise final summary when the task is truly complete."""
+- Return a concise final summary when the task is truly complete.
+
+# Memory Operations
+You have access to a persistent memory repository.
+- Use dedicated memory tools (save_memory, update_memory, delete_memory) to persist durable user preferences, critical feedback, project constraints, and references.
+- Always provide structured metadata (name, type, description) when creating memories.
+- Treat recalled memories as contextual background, but always verify claims against live code."""
 
 
 @dataclass
@@ -164,3 +170,7 @@ class AgentConfig:
     # ContextManager trim threshold / structured logical window, in estimated tokens.
     max_context_tokens: int = 100_000
     structured_context_window_limit: int = 256_000
+    # Long-term persistent memory subsystem.
+    long_term_memory_enabled: bool = True
+    memory_global_dir: Path | None = None
+    memory_project_dir: Path | None = None

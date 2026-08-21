@@ -70,6 +70,26 @@ class Harness:
             max_subagents=config.constraints.max_subagents,
         )
         self.tools = self._build_tools(depth=0)
+        if config.long_term_memory_enabled:
+            from .long_term_memory.retriever import MemoryRetriever
+            from .long_term_memory.store import MemoryStore
+            from .long_term_memory.tools import create_memory_tools
+
+            project_mem_dir = config.memory_project_dir or (self.workspace / ".agent" / "memories")
+            self.memory_store = MemoryStore(
+                project_dir=project_mem_dir,
+                global_dir=config.memory_global_dir,
+            )
+            self.memory_retriever = MemoryRetriever(
+                store=self.memory_store,
+                side_query_provider=self.provider,
+            )
+            for m_tool in create_memory_tools(self.memory_store, is_subagent=False):
+                self.tools.register(m_tool)
+        else:
+            self.memory_store = None
+            self.memory_retriever = None
+
         self.executor = ToolExecutor(
             self.tools,
             max_retries=config.constraints.tool_max_retries,
@@ -104,6 +124,7 @@ class Harness:
             validator=self.validator if is_main else None,
             trace=self.trace,
             agent_name=agent_name,
+            retriever=self.memory_retriever if is_main else None,
         )
 
     def _make_executor(self, tools: ToolRegistry) -> ToolExecutor:
@@ -200,7 +221,24 @@ class Harness:
 
         effective_task = task or (session.user_task if not session.messages else None)
         if append_user and effective_task:
-            context.add_user(effective_task)
+            if self.memory_retriever is not None:
+                from .long_term_memory.injector import MemoryInjector
+
+                recalled = self.memory_retriever.prefetch(
+                    effective_task,
+                    already_surfaced=set(),
+                    session_injected_bytes=0,
+                    is_subagent=False,
+                )
+                if recalled:
+                    for m in recalled:
+                        self.trace.emit("memory_surfaced", name=m.name, type=m.type.value)
+                    wrapped_task = MemoryInjector.wrap_user_message(effective_task, recalled)
+                    context.add_user(wrapped_task)
+                else:
+                    context.add_user(effective_task)
+            else:
+                context.add_user(effective_task)
             session.user_task = effective_task
 
         if self.planner is not None:
