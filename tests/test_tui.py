@@ -122,3 +122,147 @@ def test_thinking_enabled_via_env(monkeypatch) -> None:
     tui, out = _capture()
     tui.handle_event(_make_response_event(thinking="from env"))
     assert "from env" in out.getvalue()
+
+
+def test_memory_surfaced_rendered() -> None:
+    tui, out = _capture()
+    tui.handle_event(
+        TraceEvent(
+            type="memory_surfaced",
+            session_id="test",
+            data={"name": "react_patterns.md", "type": "rule"},
+        )
+    )
+    rendered = out.getvalue()
+    assert "[memory]" in rendered
+    assert "react_patterns.md" in rendered
+    assert "rule" in rendered
+
+
+def test_fold_event_rendered() -> None:
+    tui, out = _capture()
+    tui.handle_event(
+        TraceEvent(
+            type="fold_event",
+            session_id="test",
+            data={
+                "event": "compacted",
+                "before_tokens": 12000,
+                "after_tokens": 3000,
+                "savings_ratio": 0.75,
+            },
+        )
+    )
+    rendered = out.getvalue()
+    assert "[fold]" in rendered
+    assert "12,000" in rendered
+    assert "3,000" in rendered
+    assert "75.0%" in rendered
+
+
+def test_session_metrics_rendered() -> None:
+    tui, out = _capture()
+    tui.handle_event(
+        TraceEvent(
+            type="session_metrics",
+            session_id="test",
+            data={
+                "total_prompt_tokens": 8500,
+                "total_completion_tokens": 1500,
+                "total_tokens": 10000,
+            },
+        )
+    )
+    rendered = out.getvalue()
+    assert "Session Metrics" in rendered
+    assert "10,000" in rendered
+
+
+def test_tool_result_diff_rendering() -> None:
+    tui, out = _capture()
+    diff_text = "--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,3 @@\n+def bar(): pass\n"
+    tui.handle_event(
+        TraceEvent(
+            type="tool_result",
+            session_id="test",
+            data={"name": "edit_file", "success": True, "output_preview": diff_text},
+        )
+    )
+    rendered = out.getvalue()
+    assert "diff:" in rendered
+    assert "def bar(): pass" in rendered
+
+
+def test_markdown_rendering_in_llm_response() -> None:
+    tui, out = _capture()
+    markdown_content = "### Solution\nHere is the code:\n```python\nx = 42\n```"
+    tui.handle_event(_make_response_event(text=markdown_content))
+    rendered = out.getvalue()
+    assert "Agent:" in rendered
+    assert "Solution" in rendered
+    assert "x = 42" in rendered
+
+
+def test_subagent_depth_visualization() -> None:
+    tui, out = _capture()
+    tui.handle_event(
+        TraceEvent(
+            type="subagent_start",
+            session_id="test",
+            data={"depth": 2, "max_steps": 5, "task": "subtask"},
+        )
+    )
+    tui.handle_event(
+        TraceEvent(
+            type="step_start",
+            session_id="test",
+            data={"step": 1, "agent": "subagent_1"},
+        )
+    )
+    tui.handle_event(
+        TraceEvent(
+            type="subagent_end",
+            session_id="test",
+            data={"depth": 2, "ok": True, "status": "completed", "steps_used": 1, "tool_calls_used": 1},
+        )
+    )
+    rendered = out.getvalue()
+    assert "[subagent]" in rendered
+    assert "subtask" in rendered
+    assert "subagent_1" in rendered
+
+
+def test_show_help_table() -> None:
+    tui, out = _capture()
+    tui._show_help()
+    rendered = out.getvalue()
+    assert "NovaCode Interactive Commands" in rendered
+    assert "/help" in rendered
+    assert "/new" in rendered
+    assert "/tokens" in rendered
+    assert "/diff" in rendered
+
+
+def test_token_tracking_and_show_tokens() -> None:
+    tui, out = _capture()
+    tui.handle_event(
+        TraceEvent(
+            type="llm_response",
+            session_id="test",
+            data={
+                "text": "Done",
+                "usage": {"prompt_tokens": 150, "completion_tokens": 50, "total_tokens": 200},
+            },
+        )
+    )
+    assert tui._total_usage["prompt_tokens"] == 150
+    assert tui._total_usage["completion_tokens"] == 50
+    assert tui._total_usage["total_tokens"] == 200
+
+    tui._show_tokens()
+    rendered = out.getvalue()
+    assert "Token Usage Summary" in rendered
+    assert "150" in rendered
+    assert "50" in rendered
+    assert "200" in rendered
+
