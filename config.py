@@ -118,6 +118,7 @@ class LLMConfig:
     # Effort for secondary calls (subagents and context folding): cheap
     # summarization/mechanical work that does not need reasoning by default.
     secondary_reasoning_effort: str | None = "none"
+    stream: bool = True
 
     @classmethod
     def from_env(cls) -> LLMConfig:
@@ -126,6 +127,8 @@ class LLMConfig:
             provider = "openai"
         default_model = "gpt-4o-mini" if provider == "openai" else "claude-3-5-sonnet-latest"
         key_env = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
+        stream_val = os.getenv("NOVACODE_STREAM", "1").strip().lower()
+        stream_enabled = stream_val in ("1", "true", "yes", "on")
         return cls(
             provider=provider,  # type: ignore[arg-type]
             model=os.getenv("NOVACODE_MODEL", default_model),
@@ -139,6 +142,7 @@ class LLMConfig:
             secondary_reasoning_effort=_parse_reasoning_effort(
                 os.getenv("NOVACODE_SECONDARY_REASONING_EFFORT"), "none"
             ),
+            stream=stream_enabled,
         )
 
 

@@ -53,11 +53,13 @@ class TraceWriter:
     def emit(self, event_type: str, **data: Any) -> TraceEvent:
         event = TraceEvent(type=event_type, session_id=self.session_id, data=dict(data))
         with self._lock:
-            path = self._path()
-            if path is not None:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                with path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(event.to_dict(), ensure_ascii=False, default=str) + "\n")
+            # Skip writing ephemeral token stream chunks to disk to avoid bloating JSONL traces
+            if event_type != "llm_chunk":
+                path = self._path()
+                if path is not None:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    with path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(event.to_dict(), ensure_ascii=False, default=str) + "\n")
             for listener in self.listeners:
                 listener(event)
         return event

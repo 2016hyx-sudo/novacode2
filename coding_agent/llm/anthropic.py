@@ -9,7 +9,7 @@ import anthropic
 
 from config import LLMConfig
 
-from .base import LLMError, LLMResponse, Message, ToolCall, ToolSchema
+from .base import LLMError, LLMResponse, Message, StreamCallback, StreamChunk, ToolCall, ToolSchema
 
 
 class AnthropicProvider:
@@ -27,6 +27,7 @@ class AnthropicProvider:
         tools: list[ToolSchema] | tuple[ToolSchema, ...] | None = None,
         *,
         reasoning_effort: str | None = None,
+        on_chunk: StreamCallback | None = None,
     ) -> LLMResponse:
         system_parts: list[str] = []
         api_messages: list[dict[str, Any]] = []
@@ -127,6 +128,11 @@ class AnthropicProvider:
                 tool_params[-1]["cache_control"] = cache_marker
             kwargs["tools"] = tool_params
 
+        if on_chunk is not None and getattr(self.config, "stream", True):
+            return self._chat_stream(kwargs, on_chunk)
+        return self._chat_sync(kwargs)
+
+    def _chat_sync(self, kwargs: dict[str, Any]) -> LLMResponse:
         try:
             response = self.client.messages.create(**kwargs)
         except anthropic.APIError as exc:
@@ -191,6 +197,127 @@ class AnthropicProvider:
             stop_reason=getattr(response, "stop_reason", None),
             usage=usage,
             thinking="\n".join(thinking_parts) or None,
+            raw_content=raw_blocks or None,
+        )
+
+    def _chat_stream(self, kwargs: dict[str, Any], on_chunk: StreamCallback) -> LLMResponse:
+        stream_kwargs = dict(kwargs)
+        stream_kwargs["stream"] = True
+
+        try:
+            response = self.client.messages.create(**stream_kwargs)
+        except anthropic.APIError as exc:
+            raise self._translate_error(exc) from exc
+
+        if not hasattr(response, "__iter__"):
+            return self._chat_sync(kwargs)
+
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        tool_calls_map: dict[int, dict[str, Any]] = {}
+        signatures_map: dict[int, str] = {}
+        stop_reason: str | None = None
+        usage: dict[str, Any] = {}
+
+        try:
+            for event in response:
+                event_type = getattr(event, "type", "")
+                if event_type == "message_start":
+                    msg = getattr(event, "message", None)
+                    if msg and getattr(msg, "usage", None):
+                        usage["input_tokens"] = getattr(msg.usage, "input_tokens", None)
+                        usage["cache_read_input_tokens"] = getattr(msg.usage, "cache_read_input_tokens", None)
+                        usage["cache_creation_input_tokens"] = getattr(msg.usage, "cache_creation_input_tokens", None)
+                elif event_type == "content_block_start":
+                    idx = getattr(event, "index", 0)
+                    cb = getattr(event, "content_block", None)
+                    cb_type = getattr(cb, "type", "")
+                    if cb_type == "tool_use":
+                        tool_calls_map[idx] = {
+                            "id": getattr(cb, "id", "") or "",
+                            "name": getattr(cb, "name", "") or "",
+                            "input_json": "",
+                        }
+                elif event_type == "content_block_delta":
+                    idx = getattr(event, "index", 0)
+                    delta = getattr(event, "delta", None)
+                    delta_type = getattr(delta, "type", "")
+                    delta_text = None
+                    delta_thinking = None
+
+                    if delta_type == "text_delta":
+                        delta_text = getattr(delta, "text", "") or ""
+                        text_parts.append(delta_text)
+                    elif delta_type == "thinking_delta":
+                        delta_thinking = getattr(delta, "thinking", "") or ""
+                        thinking_parts.append(delta_thinking)
+                    elif delta_type == "signature_delta":
+                        signatures_map[idx] = getattr(delta, "signature", "") or ""
+                    elif delta_type == "input_json_delta":
+                        if idx in tool_calls_map:
+                            tool_calls_map[idx]["input_json"] += getattr(delta, "partial_json", "") or ""
+
+                    if delta_text or delta_thinking:
+                        on_chunk(
+                            StreamChunk(
+                                delta_text=delta_text,
+                                delta_thinking=delta_thinking,
+                            )
+                        )
+                elif event_type == "message_delta":
+                    delta = getattr(event, "delta", None)
+                    if delta:
+                        stop_reason = getattr(delta, "stop_reason", None) or stop_reason
+                    delta_usage = getattr(event, "usage", None)
+                    if delta_usage:
+                        usage["output_tokens"] = getattr(delta_usage, "output_tokens", None)
+        except anthropic.APIError as exc:
+            raise self._translate_error(exc) from exc
+
+        full_text = "".join(text_parts) if text_parts else None
+        full_thinking = "".join(thinking_parts) if thinking_parts else None
+
+        tool_calls: list[ToolCall] = []
+        raw_blocks: list[dict[str, Any]] = []
+
+        if full_thinking:
+            raw_blocks.append(
+                {
+                    "type": "thinking",
+                    "thinking": full_thinking,
+                    "signature": signatures_map.get(0, ""),
+                }
+            )
+        if full_text:
+            raw_blocks.append({"type": "text", "text": full_text})
+
+        for idx in sorted(tool_calls_map.keys()):
+            tc_data = tool_calls_map[idx]
+            call_id = tc_data["id"]
+            call_name = tc_data["name"]
+            raw_input = tc_data["input_json"]
+            try:
+                parsed_args = json.loads(raw_input) if raw_input else {}
+            except json.JSONDecodeError:
+                parsed_args = {}
+            if not isinstance(parsed_args, dict):
+                parsed_args = {}
+            tool_calls.append(ToolCall(id=call_id, name=call_name, arguments=parsed_args))
+            raw_blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": call_id,
+                    "name": call_name,
+                    "input": parsed_args,
+                }
+            )
+
+        return LLMResponse(
+            text=full_text,
+            tool_calls=tool_calls,
+            stop_reason=stop_reason,
+            usage=usage,
+            thinking=full_thinking,
             raw_content=raw_blocks or None,
         )
 

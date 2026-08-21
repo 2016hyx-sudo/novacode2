@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .context.manager import ContextManager
-from .llm.base import LLMError, LLMProvider, LLMResponse, ToolCall
+from .llm.base import LLMError, LLMProvider, LLMResponse, StreamChunk, ToolCall
 from .llm.usage import (
     MEASUREMENT_SCHEMA_VERSION,
     new_request_id,
@@ -316,11 +316,31 @@ class AgentLoop:
                 effort = getattr(llm_config, "secondary_reasoning_effort", None) or "none"
             else:
                 effort = getattr(llm_config, "reasoning_effort", None)
+
+            def _on_chunk(chunk: StreamChunk) -> None:
+                if chunk.delta_text or chunk.delta_thinking:
+                    self._emit(
+                        "llm_chunk",
+                        step=step,
+                        delta_text=chunk.delta_text,
+                        delta_thinking=chunk.delta_thinking,
+                    )
+
             started = time.monotonic()
             try:
-                response = self.llm.chat(
-                    attempt_messages, attempt_tools, reasoning_effort=effort
-                )
+                try:
+                    response = self.llm.chat(
+                        attempt_messages,
+                        attempt_tools,
+                        reasoning_effort=effort,
+                        on_chunk=_on_chunk,
+                    )
+                except TypeError:
+                    response = self.llm.chat(
+                        attempt_messages,
+                        attempt_tools,
+                        reasoning_effort=effort,
+                    )
             except LLMError as exc:
                 self._emit(
                     "llm_request_finished",

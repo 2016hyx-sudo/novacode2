@@ -81,6 +81,11 @@ class TUI:
         # True while the interactive command loop is running.
         self._interactive = False
         self._prompt_session: Any = None
+        # Streaming buffer and state
+        self._streaming_text: bool = False
+        self._streaming_thinking: bool = False
+        self._streamed_text_buffer: list[str] = []
+        self._streamed_thinking_buffer: list[str] = []
         # Track cumulative token usage across the session.
         self._total_usage: dict[str, int] = {
             "prompt_tokens": 0,
@@ -134,13 +139,39 @@ class TUI:
             self.console.print(
                 Text(f"{indent}[llm] retry {data.get('attempt')}: {_brief(data.get('error'))}", style="yellow")
             )
+        elif kind == "llm_chunk":
+            delta_text = data.get("delta_text")
+            delta_thinking = data.get("delta_thinking")
+
+            if delta_thinking and self.show_thinking:
+                if not self._streaming_thinking:
+                    self._streaming_thinking = True
+                    self.console.print(Text(f"{indent}[thinking] ", style="dim yellow"), end="")
+                self.console.print(Text(delta_thinking, style="dim yellow"), end="")
+                self._streamed_thinking_buffer.append(delta_thinking)
+
+            if delta_text:
+                if self._streaming_thinking:
+                    self._streaming_thinking = False
+                    self.console.print()
+                if not self._streaming_text:
+                    self._streaming_text = True
+                    agent_label = "Agent:" if depth == 0 else f"Subagent (depth {depth}):"
+                    self.console.print(Text(f"{indent}{agent_label}", style="bold green"))
+                self.console.print(Text(delta_text, style="green"), end="")
+                self._streamed_text_buffer.append(delta_text)
         elif kind == "llm_response":
-            thinking = (data.get("thinking") or "").strip()
+            streamed_anything = self._streaming_text or self._streaming_thinking
+            if streamed_anything:
+                self.console.print()
+
+            thinking = (data.get("thinking") or "".join(self._streamed_thinking_buffer)).strip()
             if self.show_thinking and thinking:
                 self._thinking_blocks.append(thinking)
-                preview = _brief(thinking, THINKING_PREVIEW_LIMIT)
-                hint = "  (/think to expand)" if self._interactive and preview.endswith("…") else ""
-                self.console.print(Text(f"{indent}[thinking] {preview}{hint}", style="dim yellow"))
+                if not streamed_anything:
+                    preview = _brief(thinking, THINKING_PREVIEW_LIMIT)
+                    hint = "  (/think to expand)" if self._interactive and preview.endswith("…") else ""
+                    self.console.print(Text(f"{indent}[thinking] {preview}{hint}", style="dim yellow"))
 
             # Track token usage from response
             usage = data.get("usage") or data.get("normalized_usage")
@@ -154,11 +185,16 @@ class TUI:
                 self._total_usage["calls"] += 1
 
             text = data.get("text") or ""
-            if text.strip():
+            if text.strip() and not streamed_anything:
                 agent_label = "Agent:" if depth == 0 else f"Subagent (depth {depth}):"
                 self.console.print(Text(f"{indent}{agent_label}", style="bold green"))
                 # Render markdown with rich formatting and syntax highlighting
                 self.console.print(Markdown(text.strip()))
+
+            self._streaming_text = False
+            self._streaming_thinking = False
+            self._streamed_text_buffer.clear()
+            self._streamed_thinking_buffer.clear()
         elif kind == "tool_call":
             args = _brief(data.get("arguments"), 120)
             self.console.print(
