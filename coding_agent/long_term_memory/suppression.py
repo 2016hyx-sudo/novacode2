@@ -42,6 +42,10 @@ EPHEMERAL_PATTERNS = [
     re.compile(r"\b(?:TODO|FIXME|WIP)\s*:\s*(?:finish|fix|test)\s+line\s+\d+", re.IGNORECASE),
     re.compile(r"\bline\s+\d+\s+in\s+file\s+['\"][^'\"]+['\"]\s+is\s+temporarily", re.IGNORECASE),
     re.compile(r"/tmp/[a-zA-Z0-9_\-]+", re.IGNORECASE),
+    re.compile(r"(?:workspace|directory|repo|folder)\s+is\s+(?:currently\s+)?empty", re.IGNORECASE),
+    re.compile(r"currently\s+empty\s+of\s+(?:source\s+)?files", re.IGNORECASE),
+    re.compile(r"currently\s+contains?\s+only\s+(?:\.agent|\.git)", re.IGNORECASE),
+    re.compile(r"(?:当前目录为空|工作区为空|当前没有文件|目前只有\.agent)", re.IGNORECASE),
 ]
 
 # Patterns for one-off temporary instructions (Rule 4)

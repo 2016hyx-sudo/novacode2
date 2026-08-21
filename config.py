@@ -87,6 +87,7 @@ Important rules:
 # Memory Operations
 You have access to a persistent memory repository.
 - Use dedicated memory tools (save_memory, update_memory, delete_memory) to persist durable user preferences, critical feedback, project constraints, and references.
+- Never record ephemeral runtime state in memory (e.g., "workspace is currently empty", "files do not exist yet", "running step 1", temporary debug logs). Only record durable, reusable project/user guidelines.
 - Always provide structured metadata (name, type, description) when creating memories.
 - Treat recalled memories as contextual background, but always verify claims against live code."""
 
