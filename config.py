@@ -152,6 +152,7 @@ class Constraints:
 
 
 StorageLocation = Literal["project", "user"]
+GlobalMemoryLocation = Literal["user", "project"]
 
 
 @dataclass
@@ -170,12 +171,14 @@ class AgentConfig:
     # Structured context / checkpoint-resume subsystem.
     structured_context_enabled: bool = False
     agent_dir: Path = field(default_factory=lambda: Path(".agent"))
-    # Storage location strategy: "project" (inside workspace /.agent) or "user" (inside ~/.novacode)
+    # Storage location strategy for sessions & traces: "project" (inside workspace /.agent) or "user" (inside ~/.novacode)
     storage_location: StorageLocation = "project"
     # ContextManager trim threshold / structured logical window, in estimated tokens.
     max_context_tokens: int = 100_000
     structured_context_window_limit: int = 256_000
     # Long-term persistent memory subsystem.
     long_term_memory_enabled: bool = True
+    # Global memory location strategy: "user" (in ~/.novacode/memories/global) or "project" (in <workspace>/.agent/memories/global)
+    global_memory_location: GlobalMemoryLocation = "user"
     memory_global_dir: Path | None = None
     memory_project_dir: Path | None = None

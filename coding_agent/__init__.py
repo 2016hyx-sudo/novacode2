@@ -75,14 +75,20 @@ class Harness:
             from .long_term_memory.store import MemoryStore
             from .long_term_memory.tools import create_memory_tools
 
-            project_mem_dir = config.memory_project_dir or (
-                (config.agent_dir / "memories")
-                if (config.structured_context_enabled or config.storage_location == "user")
-                else (self.workspace / ".agent" / "memories")
-            )
+            # Project memory is ALWAYS rooted in the project's .agent/memories directory
+            project_mem_dir = config.memory_project_dir or (self.workspace / ".agent" / "memories")
+
+            # Global memory can be located in user home (~/.novacode) or project (.agent/memories/global)
+            if config.memory_global_dir is not None:
+                global_mem_dir = config.memory_global_dir
+            elif getattr(config, "global_memory_location", "user") == "project":
+                global_mem_dir = self.workspace / ".agent" / "memories" / "global"
+            else:
+                global_mem_dir = Path.home() / ".novacode" / "memories" / "global"
+
             self.memory_store = MemoryStore(
                 project_dir=project_mem_dir,
-                global_dir=config.memory_global_dir,
+                global_dir=global_mem_dir,
             )
             self.memory_retriever = MemoryRetriever(
                 store=self.memory_store,

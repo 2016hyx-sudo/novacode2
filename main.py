@@ -40,7 +40,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--storage-location",
         choices=["project", "user"],
         default=None,
-        help="Storage root for sessions, traces, and memories: 'project' (inside workspace/.agent) or 'user' (inside ~/.novacode)",
+        help="Storage root for sessions and traces: 'project' (inside workspace/.agent) or 'user' (inside ~/.novacode)",
+    )
+    parser.add_argument(
+        "--global-memory-location",
+        choices=["user", "project"],
+        default=None,
+        help="Storage location for global user memories: 'user' (~/.novacode/memories/global) or 'project' (<workspace>/.agent/memories/global)",
     )
     parser.add_argument("--memory-dir", default=None, help="Project memory storage directory")
     parser.add_argument("--memory-global-dir", default=None, help="Global memory storage directory")
@@ -100,6 +106,13 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
     if storage_location not in ("project", "user"):
         storage_location = "project"
 
+    global_memory_location = (
+        args.global_memory_location
+        or os.getenv("NOVACODE_GLOBAL_MEMORY_LOCATION", "user")
+    ).strip().lower()
+    if global_memory_location not in ("user", "project"):
+        global_memory_location = "user"
+
     import hashlib
     import re
 
@@ -109,13 +122,22 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
     session_explicit = bool(args.session_dir or os.getenv("NOVACODE_SESSION_DIR"))
     trace_explicit = bool(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR"))
 
+    # Project memory is ALWAYS located under the project workspace (.agent/memories)
+    memory_project_dir = Path(args.memory_dir or os.getenv("NOVACODE_MEMORY_DIR") or (workspace / ".agent" / "memories"))
+
+    # Global memory can be located in ~/.novacode/memories/global or <workspace>/.agent/memories/global
+    if args.memory_global_dir or os.getenv("NOVACODE_MEMORY_GLOBAL_DIR"):
+        memory_global_dir = Path(args.memory_global_dir or os.getenv("NOVACODE_MEMORY_GLOBAL_DIR"))
+    elif global_memory_location == "project":
+        memory_global_dir = workspace / ".agent" / "memories" / "global"
+    else:
+        memory_global_dir = Path.home() / ".novacode" / "memories" / "global"
+
     if storage_location == "user":
         user_root = Path.home() / ".novacode" / "projects" / workspace_slug
         agent_dir = Path(args.agent_dir or os.getenv("NOVACODE_AGENT_DIR") or user_root)
         session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR") or (agent_dir / "sessions"))
         trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR") or (agent_dir / "traces"))
-        memory_project_dir = Path(args.memory_dir or os.getenv("NOVACODE_MEMORY_DIR") or (agent_dir / "memories"))
-        memory_global_dir = Path(args.memory_global_dir or os.getenv("NOVACODE_MEMORY_GLOBAL_DIR") or (Path.home() / ".novacode" / "memories" / "global"))
     else:
         # project mode
         agent_dir = Path(args.agent_dir or os.getenv("NOVACODE_AGENT_DIR") or (workspace / ".agent"))
@@ -125,8 +147,6 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
         else:
             session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR") or (workspace / ".sessions"))
             trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR") or (workspace / ".traces"))
-        memory_project_dir = Path(args.memory_dir or os.getenv("NOVACODE_MEMORY_DIR") or (agent_dir / "memories"))
-        memory_global_dir = Path(args.memory_global_dir or os.getenv("NOVACODE_MEMORY_GLOBAL_DIR") or (Path.home() / ".novacode" / "memories" / "global"))
 
     return AgentConfig(
         llm=llm,
@@ -140,6 +160,7 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
         structured_context_enabled=structured_context,
         agent_dir=agent_dir,
         storage_location=storage_location,  # type: ignore[arg-type]
+        global_memory_location=global_memory_location,  # type: ignore[arg-type]
         memory_project_dir=memory_project_dir,
         memory_global_dir=memory_global_dir,
     )
