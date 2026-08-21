@@ -78,11 +78,12 @@ class Harness:
             # Project memory is ALWAYS rooted in the project's .agent/memories directory
             project_mem_dir = config.memory_project_dir or (self.workspace / ".agent" / "memories")
 
-            # Global memory can be located in user home (~/.novacode) or project (.agent/memories/global)
+            # Global memory can be located in user home (~/.novacode) or novacode root (novacode/.agent/memories/global)
             if config.memory_global_dir is not None:
                 global_mem_dir = config.memory_global_dir
-            elif getattr(config, "global_memory_location", "user") == "project":
-                global_mem_dir = self.workspace / ".agent" / "memories" / "global"
+            elif getattr(config, "global_memory_location", "user") in ("agent", "project"):
+                novacode_root = getattr(config, "novacode_root", None) or Path(__file__).resolve().parents[1]
+                global_mem_dir = novacode_root / ".agent" / "memories" / "global"
             else:
                 global_mem_dir = Path.home() / ".novacode" / "memories" / "global"
 

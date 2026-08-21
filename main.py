@@ -44,9 +44,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--global-memory-location",
-        choices=["user", "project"],
+        choices=["user", "agent"],
         default=None,
-        help="Storage location for global user memories: 'user' (~/.novacode/memories/global) or 'project' (<workspace>/.agent/memories/global)",
+        help="Global user memory storage location: 'user' (~/.novacode/memories/global) or 'agent' (<novacode_root>/.agent/memories/global)",
     )
     parser.add_argument("--memory-dir", default=None, help="Project memory storage directory")
     parser.add_argument("--memory-global-dir", default=None, help="Global memory storage directory")
@@ -90,6 +90,8 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
         constraints.max_steps = args.max_steps
 
     workspace = Path(args.workspace or os.getenv("NOVACODE_WORKSPACE", ".")).expanduser().resolve()
+    novacode_root = Path(__file__).resolve().parent
+
     planner_enabled = (
         args.planner if args.planner is not None else _truthy(os.getenv("NOVACODE_PLANNER"))
     )
@@ -110,7 +112,7 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
         args.global_memory_location
         or os.getenv("NOVACODE_GLOBAL_MEMORY_LOCATION", "user")
     ).strip().lower()
-    if global_memory_location not in ("user", "project"):
+    if global_memory_location not in ("user", "agent"):
         global_memory_location = "user"
 
     import hashlib
@@ -125,11 +127,11 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
     # Project memory is ALWAYS located under the project workspace (.agent/memories)
     memory_project_dir = Path(args.memory_dir or os.getenv("NOVACODE_MEMORY_DIR") or (workspace / ".agent" / "memories"))
 
-    # Global memory can be located in ~/.novacode/memories/global or <workspace>/.agent/memories/global
+    # Global user memory is in ~/.novacode/memories/global or novacode/.agent/memories/global
     if args.memory_global_dir or os.getenv("NOVACODE_MEMORY_GLOBAL_DIR"):
         memory_global_dir = Path(args.memory_global_dir or os.getenv("NOVACODE_MEMORY_GLOBAL_DIR"))
-    elif global_memory_location == "project":
-        memory_global_dir = workspace / ".agent" / "memories" / "global"
+    elif global_memory_location == "agent":
+        memory_global_dir = novacode_root / ".agent" / "memories" / "global"
     else:
         memory_global_dir = Path.home() / ".novacode" / "memories" / "global"
 

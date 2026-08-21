@@ -151,8 +151,10 @@ class Constraints:
     require_verification_after_edit: bool = True
 
 
+NOVACODE_ROOT = Path(__file__).resolve().parent
+
 StorageLocation = Literal["project", "user"]
-GlobalMemoryLocation = Literal["user", "project"]
+GlobalMemoryLocation = Literal["user", "agent"]
 
 
 @dataclass
@@ -161,6 +163,7 @@ class AgentConfig:
 
     llm: LLMConfig = field(default_factory=LLMConfig)
     workspace: Path = field(default_factory=Path.cwd)
+    novacode_root: Path = field(default_factory=lambda: NOVACODE_ROOT)
     planner_enabled: bool = False
     constraints: Constraints = field(default_factory=Constraints)
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -178,7 +181,7 @@ class AgentConfig:
     structured_context_window_limit: int = 256_000
     # Long-term persistent memory subsystem.
     long_term_memory_enabled: bool = True
-    # Global memory location strategy: "user" (in ~/.novacode/memories/global) or "project" (in <workspace>/.agent/memories/global)
+    # Global memory location strategy: "user" (in ~/.novacode/memories/global) or "agent" (in novacode/.agent/memories/global)
     global_memory_location: GlobalMemoryLocation = "user"
     memory_global_dir: Path | None = None
     memory_project_dir: Path | None = None
