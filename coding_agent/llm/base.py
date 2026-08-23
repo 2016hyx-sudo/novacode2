@@ -1,7 +1,7 @@
 """Provider-neutral data structures shared by the whole harness."""
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -132,6 +132,20 @@ class LLMResponse:
     normalized_usage: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class StreamChunk:
+    """A streaming chunk emitted during LLM response generation."""
+
+    delta_text: str | None = None
+    delta_thinking: str | None = None
+    tool_call_chunks: list[dict[str, Any]] | None = None
+    usage: dict[str, Any] | None = None
+    stop_reason: str | None = None
+
+
+StreamCallback = Callable[[StreamChunk], None]
+
+
 class LLMError(Exception):
     """Raised by providers for API/transport failures.
 
@@ -152,10 +166,12 @@ class LLMProvider(Protocol):
         tools: Sequence[ToolSchema] | None = None,
         *,
         reasoning_effort: str | None = None,
+        on_chunk: StreamCallback | None = None,
     ) -> LLMResponse:
         """Send messages and optional tool schemas, return a unified response.
 
         ``reasoning_effort`` overrides the provider's configured effort for this
         call ("none" | "low" | "high" | "max"); None defers to the config.
+        ``on_chunk`` receives real-time StreamChunk events when streaming is active.
         """
         ...

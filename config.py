@@ -82,7 +82,23 @@ Important rules:
 - Only access files inside the workspace.
 - After modifying code, run an appropriate verification command before declaring success.
 - If a tool fails, read the error message, diagnose the cause, and change your approach.
-- Return a concise final summary when the task is truly complete."""
+- Return a concise final summary when the task is truly complete.
+
+# Memory Operations
+You have access to a persistent memory repository for cross-session knowledge retention.
+- Use dedicated memory tools (save_memory, update_memory, delete_memory) to persist durable knowledge:
+  • user: Stable user workflow preferences and profile traits.
+  • project: Durable architectural constraints, technology choices, and repository conventions.
+  • feedback: Root cause (Why) + verified fix recipe (How) for non-trivial bugs.
+  • reference: Pointers to crucial external documentation or system interfaces.
+- Strict Negative Suppression Rules (DO NOT SAVE):
+  1. No unverified hypotheses: Never save speculative guesses or untested theories.
+  2. No codebase facts: Never store raw directory trees, signatures, or grepable code.
+  3. No ephemeral state: Never store temporary runtime observations (e.g., "workspace is empty", "files don't exist yet", "step 1 finished", temporary logs).
+  4. No one-off generalizations: Never convert single-turn debugging requests into persistent rules.
+  5. No duplicates: Search/inspect before writing; use update_memory to modify existing records.
+  6. No secrets: Never store API keys, tokens, passwords, or credentials.
+- Treat recalled memories as contextual background; always verify claims against live code."""
 
 
 @dataclass
@@ -102,6 +118,7 @@ class LLMConfig:
     # Effort for secondary calls (subagents and context folding): cheap
     # summarization/mechanical work that does not need reasoning by default.
     secondary_reasoning_effort: str | None = "none"
+    stream: bool = True
 
     @classmethod
     def from_env(cls) -> LLMConfig:
@@ -110,6 +127,8 @@ class LLMConfig:
             provider = "openai"
         default_model = "gpt-4o-mini" if provider == "openai" else "claude-3-5-sonnet-latest"
         key_env = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
+        stream_val = os.getenv("NOVACODE_STREAM", "1").strip().lower()
+        stream_enabled = stream_val in ("1", "true", "yes", "on")
         return cls(
             provider=provider,  # type: ignore[arg-type]
             model=os.getenv("NOVACODE_MODEL", default_model),
@@ -123,6 +142,7 @@ class LLMConfig:
             secondary_reasoning_effort=_parse_reasoning_effort(
                 os.getenv("NOVACODE_SECONDARY_REASONING_EFFORT"), "none"
             ),
+            stream=stream_enabled,
         )
 
 
@@ -145,12 +165,19 @@ class Constraints:
     require_verification_after_edit: bool = True
 
 
+NOVACODE_ROOT = Path(__file__).resolve().parent
+
+StorageLocation = Literal["project", "user"]
+GlobalMemoryLocation = Literal["user", "agent"]
+
+
 @dataclass
 class AgentConfig:
     """Top-level harness configuration."""
 
     llm: LLMConfig = field(default_factory=LLMConfig)
     workspace: Path = field(default_factory=Path.cwd)
+    novacode_root: Path = field(default_factory=lambda: NOVACODE_ROOT)
     planner_enabled: bool = False
     constraints: Constraints = field(default_factory=Constraints)
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
@@ -161,6 +188,14 @@ class AgentConfig:
     # Structured context / checkpoint-resume subsystem.
     structured_context_enabled: bool = False
     agent_dir: Path = field(default_factory=lambda: Path(".agent"))
+    # Storage location strategy for sessions & traces: "project" (inside workspace /.agent) or "user" (inside ~/.novacode)
+    storage_location: StorageLocation = "project"
     # ContextManager trim threshold / structured logical window, in estimated tokens.
     max_context_tokens: int = 100_000
     structured_context_window_limit: int = 256_000
+    # Long-term persistent memory subsystem.
+    long_term_memory_enabled: bool = True
+    # Global memory location strategy: "user" (in ~/.novacode/memories/global) or "agent" (in novacode/.agent/memories/global)
+    global_memory_location: GlobalMemoryLocation = "user"
+    memory_global_dir: Path | None = None
+    memory_project_dir: Path | None = None

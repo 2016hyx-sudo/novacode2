@@ -22,6 +22,7 @@ from .runtime.trace import TraceEvent, TraceWriter
 from .runtime.validator import Validator
 from .tools import SubagentTool, ToolRegistry, build_tool_registry
 from .tools.executor import ToolExecutor
+from .tools.shell import ShellRunner
 
 SUBAGENT_SYSTEM_PROMPT = """You are a NovaCode subagent. Complete the single task given by the
 main coding agent and return one concise final report with your findings or changes.
@@ -53,6 +54,7 @@ class Harness:
         session_store: SessionStore,
         planner: Planner | None,
         validator: Validator,
+        shell_runner: ShellRunner | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -60,6 +62,7 @@ class Harness:
         self.session_store = session_store
         self.planner = planner
         self.validator = validator
+        self.shell_runner = shell_runner
         self.workspace = Path(config.workspace).expanduser().resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.budget = RunBudget(
@@ -67,6 +70,37 @@ class Harness:
             max_subagents=config.constraints.max_subagents,
         )
         self.tools = self._build_tools(depth=0)
+        if config.long_term_memory_enabled:
+            from .long_term_memory.retriever import MemoryRetriever
+            from .long_term_memory.store import MemoryStore
+            from .long_term_memory.tools import create_memory_tools
+
+            # Project memory is ALWAYS rooted in the project's .agent/memories directory
+            project_mem_dir = config.memory_project_dir or (self.workspace / ".agent" / "memories")
+
+            # Global memory can be located in user home (~/.novacode) or novacode root (novacode/.agent/memories/global)
+            if config.memory_global_dir is not None:
+                global_mem_dir = config.memory_global_dir
+            elif getattr(config, "global_memory_location", "user") in ("agent", "project"):
+                novacode_root = getattr(config, "novacode_root", None) or Path(__file__).resolve().parents[1]
+                global_mem_dir = novacode_root / ".agent" / "memories" / "global"
+            else:
+                global_mem_dir = Path.home() / ".novacode" / "memories" / "global"
+
+            self.memory_store = MemoryStore(
+                project_dir=project_mem_dir,
+                global_dir=global_mem_dir,
+            )
+            self.memory_retriever = MemoryRetriever(
+                store=self.memory_store,
+                side_query_provider=self.provider,
+            )
+            for m_tool in create_memory_tools(self.memory_store, is_subagent=False):
+                self.tools.register(m_tool)
+        else:
+            self.memory_store = None
+            self.memory_retriever = None
+
         self.executor = ToolExecutor(
             self.tools,
             max_retries=config.constraints.tool_max_retries,
@@ -101,6 +135,7 @@ class Harness:
             validator=self.validator if is_main else None,
             trace=self.trace,
             agent_name=agent_name,
+            retriever=self.memory_retriever if is_main else None,
         )
 
     def _make_executor(self, tools: ToolRegistry) -> ToolExecutor:
@@ -120,6 +155,7 @@ class Harness:
             self.workspace,
             self.config.constraints,
             subagent_tool=subagent_tool,
+            shell_runner=self.shell_runner,
         )
 
     def _make_subagent_tool(self, depth: int) -> SubagentTool:
@@ -196,7 +232,24 @@ class Harness:
 
         effective_task = task or (session.user_task if not session.messages else None)
         if append_user and effective_task:
-            context.add_user(effective_task)
+            if self.memory_retriever is not None:
+                from .long_term_memory.injector import MemoryInjector
+
+                recalled = self.memory_retriever.prefetch(
+                    effective_task,
+                    already_surfaced=set(),
+                    session_injected_bytes=0,
+                    is_subagent=False,
+                )
+                if recalled:
+                    for m in recalled:
+                        self.trace.emit("memory_surfaced", name=m.name, type=m.type.value)
+                    wrapped_task = MemoryInjector.wrap_user_message(effective_task, recalled)
+                    context.add_user(wrapped_task)
+                else:
+                    context.add_user(effective_task)
+            else:
+                context.add_user(effective_task)
             session.user_task = effective_task
 
         if self.planner is not None:
@@ -234,11 +287,12 @@ def create_harness(
     config: AgentConfig,
     *,
     listeners: list[Callable[[TraceEvent], None]] | None = None,
+    shell_runner: ShellRunner | None = None,
 ) -> Harness:
     if config.structured_context_enabled:
         from .structured_context.structured_harness import StructuredHarness
 
-        return StructuredHarness(config, listeners=listeners)
+        return StructuredHarness(config, listeners=listeners, shell_runner=shell_runner)
 
     provider = create_provider(config.llm)
     trace = TraceWriter(config.trace_dir, listeners=listeners)
@@ -254,6 +308,7 @@ def create_harness(
         session_store=session_store,
         planner=planner,
         validator=validator,
+        shell_runner=shell_runner,
     )
 
 

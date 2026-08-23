@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .context.manager import ContextManager
-from .llm.base import LLMError, LLMProvider, LLMResponse, ToolCall
+from .llm.base import LLMError, LLMProvider, LLMResponse, StreamChunk, ToolCall
 from .llm.usage import (
     MEASUREMENT_SCHEMA_VERSION,
     new_request_id,
@@ -50,6 +50,7 @@ class AgentLoop:
         validator: Validator | None = None,
         trace: TraceWriter | None = None,
         agent_name: str = "main",
+        retriever: Any | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -62,10 +63,32 @@ class AgentLoop:
         self.validator = validator
         self.trace = trace
         self.agent_name = agent_name
+        self.retriever = retriever
+        self._already_surfaced: set[str] = set()
+        self._session_injected_bytes: int = 0
 
     def run(self, task: str | None = None) -> AgentRunResult:
         if task is not None:
-            self.context.add_user(task)
+            if self.retriever is not None and self.agent_name == "main":
+                from .long_term_memory.injector import MemoryInjector
+
+                recalled = self.retriever.prefetch(
+                    task,
+                    already_surfaced=self._already_surfaced,
+                    session_injected_bytes=self._session_injected_bytes,
+                    is_subagent=False,
+                )
+                if recalled:
+                    for m in recalled:
+                        self._already_surfaced.add(m.name)
+                        self._session_injected_bytes += len(m.content.encode("utf-8"))
+                        self._emit("memory_surfaced", name=m.name, type=m.type.value)
+                    wrapped_task = MemoryInjector.wrap_user_message(task, recalled)
+                    self.context.add_user(wrapped_task)
+                else:
+                    self.context.add_user(task)
+            else:
+                self.context.add_user(task)
 
         history: list[ToolUseRecord] = []
         steps_used = 0
@@ -293,11 +316,31 @@ class AgentLoop:
                 effort = getattr(llm_config, "secondary_reasoning_effort", None) or "none"
             else:
                 effort = getattr(llm_config, "reasoning_effort", None)
+
+            def _on_chunk(chunk: StreamChunk) -> None:
+                if chunk.delta_text or chunk.delta_thinking:
+                    self._emit(
+                        "llm_chunk",
+                        step=step,
+                        delta_text=chunk.delta_text,
+                        delta_thinking=chunk.delta_thinking,
+                    )
+
             started = time.monotonic()
             try:
-                response = self.llm.chat(
-                    attempt_messages, attempt_tools, reasoning_effort=effort
-                )
+                try:
+                    response = self.llm.chat(
+                        attempt_messages,
+                        attempt_tools,
+                        reasoning_effort=effort,
+                        on_chunk=_on_chunk,
+                    )
+                except TypeError:
+                    response = self.llm.chat(
+                        attempt_messages,
+                        attempt_tools,
+                        reasoning_effort=effort,
+                    )
             except LLMError as exc:
                 self._emit(
                     "llm_request_finished",

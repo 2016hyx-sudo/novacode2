@@ -17,3 +17,5 @@ results/
 *.egg-info/
 .agent/
 .eval-results/
+logs/
+novacode__*.json
