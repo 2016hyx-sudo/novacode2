@@ -17,6 +17,7 @@ from .context.session import Session, SessionStore
 from .llm import create_provider
 from .llm.base import LLMProvider
 from .runtime.constraints import RunBudget
+from .runtime.episode import TurnDisposition
 from .runtime.planner import Plan, Planner
 from .runtime.trace import TraceEvent, TraceWriter
 from .runtime.validator import Validator
@@ -70,6 +71,7 @@ class Harness:
             max_subagents=config.constraints.max_subagents,
         )
         self.tools = self._build_tools(depth=0)
+        self._last_task_outcome: TurnDisposition | None = None
         if config.long_term_memory_enabled:
             from .long_term_memory.retriever import MemoryRetriever
             from .long_term_memory.store import MemoryStore
@@ -100,6 +102,8 @@ class Harness:
         else:
             self.memory_store = None
             self.memory_retriever = None
+
+        self._register_runtime_meta_tools(self.tools)
 
         self.executor = ToolExecutor(
             self.tools,
@@ -155,8 +159,35 @@ class Harness:
             self.workspace,
             self.config.constraints,
             subagent_tool=subagent_tool,
+            protected_rel=[".agent/skills"] if self.config.skills_enabled else None,
             shell_runner=self.shell_runner,
         )
+
+    def _register_runtime_meta_tools(self, registry: ToolRegistry) -> None:
+        if self.config.skills_enabled:
+            from .skills.bank import SkillBank
+            from .skills.tool import InvokeSkillTool
+
+            project_dir = self.config.skill_project_dir or (self.workspace / ".agent" / "skills")
+            user_dir = self.config.skill_user_dir or (Path.home() / ".novacode" / "skills")
+            self.skill_bank = SkillBank(project_dir=project_dir, user_dir=user_dir)
+            registry.register(
+                InvokeSkillTool(
+                    self.skill_bank,
+                    fork_runner=self._run_skill_subagent,
+                    inline_token_limit=self.config.skill_inline_token_limit,
+                )
+            )
+        else:
+            self.skill_bank = None
+        from .tools.task_outcome import ReportTaskOutcomeTool
+
+        registry.register(ReportTaskOutcomeTool(self._submit_task_outcome))
+
+    def _submit_task_outcome(self, report: TurnDisposition) -> None:
+        # Legacy sessions retain turn semantics; the structured harness
+        # overrides this callback and submits into an EpisodeController.
+        self._last_task_outcome = report
 
     def _make_subagent_tool(self, depth: int) -> SubagentTool:
         return SubagentTool(
@@ -168,9 +199,18 @@ class Harness:
             current_depth=depth,
         )
 
-    def _run_subagent(self, task: str, max_steps: int, *, parent_depth: int) -> AgentRunResult:
+    def _run_subagent(
+        self,
+        task: str,
+        max_steps: int,
+        *,
+        parent_depth: int,
+        allowed_tools: set[str] | None = None,
+    ) -> AgentRunResult:
         child_depth = parent_depth + 1
         tools = self._build_tools(depth=child_depth)
+        if allowed_tools is not None:
+            tools = tools.clone(exclude=set(tools.names()) - allowed_tools)
         context = ContextManager(
             SUBAGENT_SYSTEM_PROMPT,
             max_context_tokens=self.config.max_context_tokens,
@@ -182,6 +222,36 @@ class Harness:
             agent_name=f"subagent-{child_depth}",
         )
         return agent.run(task)
+
+    def _run_skill_subagent(self, entry: object, rendered: str) -> AgentRunResult:
+        from .runtime.constraints import ConstraintError
+
+        try:
+            self.budget.reserve_subagent()
+        except ConstraintError as exc:
+            return AgentRunResult(text=str(exc), status="failed")
+        manifest = entry.manifest  # type: ignore[attr-defined]
+        allowed = set(manifest.allowed_tools)
+        standard = set(self._build_tools(depth=1).names())
+        unknown = allowed - standard
+        if unknown:
+            return AgentRunResult(
+                text=f"Skill requests unknown or unavailable tools: {', '.join(sorted(unknown))}",
+                status="failed",
+            )
+        prompt = (
+            f"Apply the following isolated skill package. Skill directory: {entry.skill_dir}\n\n"  # type: ignore[attr-defined]
+            f"{rendered}"
+        )
+        self.trace.emit("skill_fork_start", skill=entry.name, allowed_tools=sorted(allowed))  # type: ignore[attr-defined]
+        result = self._run_subagent(
+            prompt,
+            min(10, self.config.constraints.max_steps),
+            parent_depth=0,
+            allowed_tools=allowed,
+        )
+        self.trace.emit("skill_fork_end", skill=entry.name, status=result.status)  # type: ignore[attr-defined]
+        return result
 
     # ------------------------------------------------------------ session flow
 

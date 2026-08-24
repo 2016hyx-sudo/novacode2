@@ -5,8 +5,10 @@ workspace and with a timeout and output cap.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -66,6 +68,12 @@ class LocalShellRunner:
         workspace: Path,
         timeout: float,
     ) -> ShellExecutionResult:
+        env = dict(os.environ)
+        # Keep the lexical path: virtualenv executables are symlinks whose
+        # resolved parent (/usr/bin) does not contain the ``python`` shim.
+        interpreter_dir = str(Path(sys.executable).parent)
+        current_path = env.get("PATH", "")
+        env["PATH"] = f"{interpreter_dir}{os.pathsep}{current_path}" if current_path else interpreter_dir
         completed = subprocess.run(
             command,
             shell=True,
@@ -74,6 +82,7 @@ class LocalShellRunner:
             text=True,
             timeout=timeout,
             check=False,
+            env=env,
         )
         return ShellExecutionResult(
             returncode=completed.returncode,

@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from .context.manager import ContextManager
 from .llm.base import LLMError, LLMProvider, LLMResponse, StreamChunk, ToolCall
