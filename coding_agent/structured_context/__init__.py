@@ -1,6 +1,7 @@
 """Structured context management and checkpoint/resume subsystem."""
 from .artifact_store import ArtifactStore
 from .checkpoint import CheckpointManager
+from .episode_store import EpisodeStore
 from .event_log import EventLog
 from .event_replay import EventReplayer, ReplayResult
 from .fold_engine import FoldEngine, FoldEngineConfig, FoldResult
@@ -18,18 +19,19 @@ from .workspace import WorkspaceFingerprint
 __all__ = [
     "ArtifactStore",
     "CheckpointManager",
+    "EpisodeStore",
     "EventLog",
     "EventReplayer",
     "FoldEngine",
     "FoldEngineConfig",
     "FoldResult",
-    "ReplayResult",
     "RecoveryEngine",
     "RecoveryPolicy",
+    "ReplayResult",
     "SessionLock",
     "StateCompactConfig",
-    "StateCompactor",
     "StateCompactResult",
+    "StateCompactor",
     "StructuredContext",
     "StructuredContextConfig",
     "StructuredSessionStore",

@@ -17,6 +17,7 @@ from .filesystem import build_filesystem_tools
 from .registry import ToolRegistry
 from .shell import ShellRunner, build_shell_tool
 from .subagent import SubagentTool
+from .task_outcome import ReportTaskOutcomeTool
 
 
 def build_tool_registry(
@@ -47,6 +48,7 @@ def build_tool_registry(
 
 __all__ = [
     "FunctionTool",
+    "ReportTaskOutcomeTool",
     "ShellRunner",
     "SubagentTool",
     "Tool",

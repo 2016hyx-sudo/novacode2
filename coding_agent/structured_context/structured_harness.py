@@ -11,9 +11,11 @@ from .. import Harness
 from ..agent import AgentRunResult
 from ..context.session import SessionStore, new_session_id
 from ..llm.base import LLMProvider
+from ..runtime.episode import EpisodeController, TaskEpisode, TurnDisposition
 from ..runtime.trace import TraceEvent, TraceWriter
 from ..tools.executor import ToolExecutor
 from ..tools.shell import ShellRunner
+from .episode_store import EpisodeStore
 from .fold_engine import FoldEngine
 from .migration import migrate_legacy_session
 from .models import DriftReport, StructuredSession, canonical_json, sha256_text
@@ -67,6 +69,7 @@ class StructuredHarness(Harness):
         self.structured_store = StructuredSessionStore(session_dir)
         self._contexts: dict[str, StructuredContext] = {}
         self._active_session_id: str | None = None
+        self._episode_controllers: dict[str, EpisodeController] = {}
         self._structured_config = StructuredContextConfig(max_context_tokens=config.structured_context_window_limit)
 
         # Rebuild tools with every runtime state directory explicitly protected.
@@ -74,9 +77,14 @@ class StructuredHarness(Harness):
         for runtime_dir in (config.agent_dir, session_dir, trace_dir):
             try:
                 rel = Path(runtime_dir).expanduser().resolve().relative_to(self.workspace)
-                protected.append(rel.parts[0])
+                protected.append(str(rel))
             except (ValueError, OSError):
                 pass
+        skill_project_dir = config.skill_project_dir or (self.workspace / ".agent" / "skills")
+        try:
+            protected.append(str(Path(skill_project_dir).expanduser().resolve().relative_to(self.workspace)))
+        except (ValueError, OSError):
+            pass
         from ..tools import build_tool_registry
 
         self.tools = build_tool_registry(
@@ -92,6 +100,25 @@ class StructuredHarness(Harness):
 
             for m_tool in create_memory_tools(self.memory_store, is_subagent=False):
                 self.tools.register(m_tool)
+        if config.skills_enabled:
+            from ..skills.bank import SkillBank
+            from ..skills.tool import InvokeSkillTool
+
+            self.skill_bank = SkillBank(
+                project_dir=skill_project_dir,
+                user_dir=config.skill_user_dir or (Path.home() / ".novacode" / "skills"),
+            )
+            self.tools.register(
+                InvokeSkillTool(
+                    self.skill_bank,
+                    artifact_store=self._active_artifact_store,
+                    fork_runner=self._run_skill_subagent,
+                    inline_token_limit=config.skill_inline_token_limit,
+                )
+            )
+        from ..tools.task_outcome import ReportTaskOutcomeTool
+
+        self.tools.register(ReportTaskOutcomeTool(self._submit_task_outcome))
         self.executor = ToolExecutor(
             self.tools,
             max_retries=config.constraints.tool_max_retries,
@@ -156,6 +183,33 @@ class StructuredHarness(Harness):
         context = self._contexts.get(self._active_session_id or "")
         return context.artifact_store if context is not None else None
 
+    def _episode_store(self, session_id: str) -> EpisodeStore:
+        return EpisodeStore(self.structured_store.session_dir(session_id))
+
+    def _submit_task_outcome(self, report: TurnDisposition) -> None:
+        session_id = self._active_session_id or ""
+        controller = self._episode_controllers.get(session_id)
+        if controller is not None:
+            controller.submit(report)
+        else:
+            super()._submit_task_outcome(report)
+
+    @staticmethod
+    def _episode_evidence(context: StructuredContext, episode: TaskEpisode) -> list[dict[str, Any]]:
+        evidence: list[dict[str, Any]] = []
+        for event in context.event_log.read_since(max(0, episode.start_event_seq - 1)):
+            payload = dict(event.get("payload") or {})
+            evidence.append(
+                {
+                    "seq": int(event.get("seq", 0)),
+                    "ref": f"event-{int(event.get('seq', 0))}",
+                    "type": event.get("type"),
+                    "episode_id": episode.episode_id,
+                    **payload,
+                }
+            )
+        return evidence
+
     def _periodic_checkpoint(self, session_id: str, step: int) -> None:
         context = self._contexts.get(session_id)
         if context is None:
@@ -182,6 +236,20 @@ class StructuredHarness(Harness):
 
             hook = MemoryLifecycleHook(self.memory_store)
             hook.on_fold(context.task_state, context.tool_state)
+        controller = self._episode_controllers.get(session_id)
+        if (
+            controller is not None
+            and self.config.skill_evolution_enabled
+            and self.config.skills_enabled
+            and self.skill_bank is not None
+        ):
+            from ..skills.candidates import PendingCandidateStore
+            from ..skills.hook import SkillLifecycleHook
+
+            SkillLifecycleHook(PendingCandidateStore(self.skill_bank.project_dir)).on_fold(
+                episode=controller.episode,
+                evidence=self._episode_evidence(context, controller.episode),
+            )
 
     def _lock(self, session_id: str) -> SessionLock:
         return SessionLock(self.session_root, session_id)
@@ -202,6 +270,15 @@ class StructuredHarness(Harness):
             plan=[],
         )
         self._new_context(session, self.workspace)
+        context = self._contexts[session_id]
+        episode = TaskEpisode.new(
+            session_id=session_id,
+            objective=user_task,
+            start_event_seq=context.event_log.last_seq + 1,
+            success_criteria=list(context.task_state.success_criteria),
+        )
+        self._episode_controllers[session_id] = EpisodeController(episode)
+        self._episode_store(session_id).append("episode_started", episode)
         self.trace.bind(session_id)
         self.usage_aggregator.stats.reset()
         self.trace.emit(
@@ -229,6 +306,16 @@ class StructuredHarness(Harness):
         session = context.session
         session.plan = [step.text for step in context.task_state.remaining]
         self._contexts[session_id] = context
+        episode = self._episode_store(session_id).latest()
+        if episode is None:
+            episode = TaskEpisode.new(
+                session_id=session_id,
+                objective=context.task_state.objective or session.user_task,
+                start_event_seq=context.event_log.last_seq + 1,
+                success_criteria=list(context.task_state.success_criteria),
+            )
+            self._episode_store(session_id).append("episode_started", episode)
+        self._episode_controllers[session_id] = EpisodeController(episode)
 
         drift = context.workspace_fingerprint.diff(context.workspace_expected())
         impact_paths = self._impact_paths(context)
@@ -330,6 +417,36 @@ class StructuredHarness(Harness):
             self._replan_after_drift(context, drift, decision)
 
         effective_task = task or (session.user_task if not context.trajectory.groups else None)
+        controller = self._episode_controllers[session.session_id]
+        if append_user and effective_task and context.trajectory.groups:
+            transition = controller.begin_turn(effective_task)
+            if transition == "reopened":
+                self._episode_store(session.session_id).append("episode_reopened", controller.episode)
+                if self.config.skill_evolution_enabled and self.skill_bank is not None:
+                    from ..skills.candidates import PendingCandidateStore
+
+                    PendingCandidateStore(self.skill_bank.project_dir).mark_episode_stale(
+                        controller.episode.episode_id,
+                        older_than_version=controller.episode.outcome_version,
+                    )
+                context.event_log.append("episode_reopened", controller.episode.to_dict())
+            elif transition == "new_episode":
+                controller.supersede()
+                self._episode_store(session.session_id).append("episode_superseded", controller.episode)
+                episode = TaskEpisode.new(
+                    session_id=session.session_id,
+                    objective=effective_task,
+                    started_turn=controller.turn,
+                    start_event_seq=context.event_log.last_seq + 1,
+                    success_criteria=list(context.task_state.success_criteria),
+                )
+                controller = EpisodeController(episode)
+                self._episode_controllers[session.session_id] = controller
+                context.task_state.objective = effective_task
+                self._episode_store(session.session_id).append("episode_started", episode)
+                context.event_log.append("episode_started", episode.to_dict())
+        else:
+            controller.pending_report = None
         if append_user and effective_task:
             context.add_user(effective_task)
             session.user_task = effective_task
@@ -348,6 +465,58 @@ class StructuredHarness(Harness):
 
         agent = self.create_agent(context, agent_name="main")
         result = agent.run()
+        unresolved = [
+            item.text
+            for item in context.task_state.unresolved
+            if item.text
+        ]
+        if result.status != "completed":
+            unresolved.append(f"turn ended with status {result.status}")
+        evidence = self._episode_evidence(context, controller.episode)
+        gate = controller.apply_turn(
+            evidence=evidence,
+            unresolved=unresolved,
+            # Existing Planner steps are advisory and have no authoritative
+            # completion mutation API, so they are not marked required here.
+            plan_steps=[{**step.to_dict(), "required": False} for step in context.task_state.remaining],
+            current_objective=context.task_state.objective,
+        )
+        event_name = "episode_succeeded" if gate.passed else f"episode_{controller.episode.status}"
+        self._episode_store(session.session_id).append(
+            event_name,
+            controller.episode,
+            gate_reasons=list(gate.reasons),
+        )
+        context.event_log.append(
+            event_name,
+            {
+                "episode_id": controller.episode.episode_id,
+                "outcome_version": controller.episode.outcome_version,
+                "gate_reasons": list(gate.reasons),
+                "evidence_refs": list(gate.evidence_refs),
+            },
+        )
+        result.structured_report = {
+            "episode_id": controller.episode.episode_id,
+            "episode_status": controller.episode.status,
+            "outcome_version": controller.episode.outcome_version,
+            "completion_gate_passed": gate.passed,
+            "gate_reasons": list(gate.reasons),
+        }
+        self.trace.emit("episode_outcome", **result.structured_report)
+        if self.config.skill_evolution_enabled and self.skill_bank is not None:
+            from ..skills.candidates import PendingCandidateStore
+            from ..skills.hook import SkillLifecycleHook
+            from ..skills.maintainer import SkillMaintainer
+
+            candidate_store = PendingCandidateStore(self.skill_bank.project_dir)
+            lifecycle = SkillLifecycleHook(
+                candidate_store,
+                maintainer=SkillMaintainer(self.skill_bank, candidate_store),
+            )
+            self._consume_verified_events(lifecycle, controller.episode, evidence)
+            if gate.passed:
+                lifecycle.on_episode_succeeded(controller.episode)
         context.update_runtime_cursor(
             step=result.steps_used,
             tool_calls_used=result.tool_calls_used,
@@ -385,6 +554,38 @@ class StructuredHarness(Harness):
         )
         return result
 
+    def _transition_episode(self, session_id: str, status: str) -> None:
+        controller = self._episode_controllers.get(session_id)
+        if controller is None:
+            return
+        if status == "cancelled":
+            controller.cancel()
+        elif status == "superseded":
+            controller.supersede()
+        elif status == "dormant":
+            controller.dormant()
+        else:
+            raise ValueError(f"invalid episode transition: {status}")
+        self._episode_store(session_id).append(f"episode_{status}", controller.episode)
+        context = self._contexts.get(session_id)
+        if context is not None:
+            context.event_log.append(
+                f"episode_{status}",
+                {
+                    "episode_id": controller.episode.episode_id,
+                    "outcome_version": controller.episode.outcome_version,
+                },
+            )
+
+    def cancel_episode(self, session: StructuredSession) -> None:
+        self._transition_episode(session.session_id, "cancelled")
+
+    def supersede_episode(self, session: StructuredSession) -> None:
+        self._transition_episode(session.session_id, "superseded")
+
+    def dormancy_episode(self, session: StructuredSession) -> None:
+        self._transition_episode(session.session_id, "dormant")
+
     def _fold_engine(self, context: StructuredContext) -> FoldEngine:
         return FoldEngine(
             self.provider,
@@ -394,6 +595,40 @@ class StructuredHarness(Harness):
             model=self.config.llm.model,
             reasoning_effort=self.config.llm.secondary_reasoning_effort,
         )
+
+    @staticmethod
+    def _consume_verified_events(lifecycle: Any, episode: TaskEpisode, evidence: list[dict[str, Any]]) -> None:
+        failures = [item for item in evidence if item.get("type") == "tool_result" and not item.get("success")]
+        verifications = [
+            item
+            for item in evidence
+            if item.get("type") == "tool_result"
+            and item.get("name") == "run_shell"
+            and item.get("success")
+        ]
+        if not failures or not verifications:
+            return
+        failure = failures[-1]
+        verification = next(
+            (item for item in verifications if int(item.get("seq", 0)) > int(failure.get("seq", 0))),
+            None,
+        )
+        if verification is None:
+            return
+        fixes = [
+            item
+            for item in evidence
+            if int(failure.get("seq", 0)) < int(item.get("seq", 0)) < int(verification.get("seq", 0))
+            and item.get("type") in {"file_change", "tool_result"}
+            and item.get("success", True)
+        ]
+        if fixes:
+            lifecycle.on_verified_event(
+                episode=episode,
+                failure=failure,
+                fix=fixes[-1],
+                verification=verification,
+            )
 
     def _replan_after_drift(
         self,
@@ -450,7 +685,14 @@ class StructuredHarness(Harness):
 
     # ------------------------------------------------------------ subagents
 
-    def _run_subagent(self, task: str, max_steps: int, *, parent_depth: int) -> AgentRunResult:
+    def _run_subagent(
+        self,
+        task: str,
+        max_steps: int,
+        *,
+        parent_depth: int,
+        allowed_tools: set[str] | None = None,
+    ) -> AgentRunResult:
         child_depth = parent_depth + 1
         captured_paths: list[str] = []
 
@@ -467,7 +709,12 @@ class StructuredHarness(Harness):
 
         self.trace.listeners.append(capture)
         try:
-            result = super()._run_subagent(task, max_steps, parent_depth=parent_depth)
+            result = super()._run_subagent(
+                task,
+                max_steps,
+                parent_depth=parent_depth,
+                allowed_tools=allowed_tools,
+            )
         finally:
             if capture in self.trace.listeners:
                 self.trace.listeners.remove(capture)

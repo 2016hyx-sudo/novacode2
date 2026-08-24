@@ -83,6 +83,9 @@ Important rules:
 - After modifying code, run an appropriate verification command before declaring success.
 - If a tool fails, read the error message, diagnose the cause, and change your approach.
 - Return a concise final summary when the task is truly complete.
+- Before the final user-facing response in every turn, call report_task_outcome.
+  Use completion_proposed only when the complete multi-turn objective is satisfied
+  with replayable evidence; use waiting_user, continue, or blocked otherwise.
 
 # Memory Operations
 You have access to a persistent memory repository for cross-session knowledge retention.
@@ -199,3 +202,10 @@ class AgentConfig:
     global_memory_location: GlobalMemoryLocation = "user"
     memory_global_dir: Path | None = None
     memory_project_dir: Path | None = None
+    # Static skills meta-tools are always registered when enabled; skill
+    # additions therefore never alter the provider tool-schema prefix.
+    skills_enabled: bool = True
+    skill_project_dir: Path | None = None
+    skill_user_dir: Path | None = None
+    skill_inline_token_limit: int = 2_000
+    skill_evolution_enabled: bool = True

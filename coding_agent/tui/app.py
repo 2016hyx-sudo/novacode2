@@ -327,6 +327,7 @@ class TUI:
         table.add_row("/think", "Expand and view all recorded reasoning/thinking blocks")
         table.add_row("/tokens, /usage", "Show cumulative token usage statistics")
         table.add_row("/diff, /status", "Inspect git status and workspace changes")
+        table.add_row("/skill-eval", "Show skill bank and evolution candidate status")
         table.add_row("/clear, /cls", "Clear terminal screen")
         table.add_row("/exit, /quit", "Exit NovaCode interactive mode")
         self.console.print(table)
@@ -405,6 +406,7 @@ class TUI:
                 capture_output=True,
                 text=True,
                 timeout=5,
+                check=False,
             )
             if status_proc.returncode != 0:
                 self.console.print(Text("Not a git repository or git unavailable.", style="dim yellow"))
@@ -424,12 +426,30 @@ class TUI:
                 capture_output=True,
                 text=True,
                 timeout=5,
+                check=False,
             )
             diff_out = diff_proc.stdout.strip()
             if diff_out:
                 self.console.print(Panel(diff_out, title="Diff Summary", border_style="dim cyan"))
         except Exception as exc:
             self.console.print(Text(f"Failed to get git status: {exc}", style="red"))
+
+    def _show_skill_eval(self, harness: Any) -> None:
+        from ..skills.eval import skill_evaluation_status
+
+        bank = getattr(harness, "skill_bank", None)
+        if bank is None:
+            self.console.print(Text("Skills are disabled.", style="dim yellow"))
+            return
+        status = skill_evaluation_status(project_dir=bank.project_dir, user_dir=bank.user_dir)
+        table = Table(title="Skill Evolution Status", header_style="bold blue")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="white")
+        table.add_row("Skills", str(status["skills"]))
+        table.add_row("Project / User", f"{status['project_skills']} / {status['user_skills']}")
+        table.add_row("Candidates", str(status["candidates"]))
+        table.add_row("Candidate status", _brief(status["candidate_status"], 300))
+        self.console.print(table)
 
     # ------------------------------------------------------------ input layer
 
@@ -467,7 +487,7 @@ class TUI:
                 raise
             except Exception:
                 # Fallback to standard readline/input
-                pass
+                self._prompt_session = None
 
         if _READLINE_AVAILABLE and os.name == "posix":
             prompt = "\001\x1b[1;32m\002> \001\x1b[0m\002"
@@ -489,7 +509,7 @@ class TUI:
         self._interactive = True
         self.console.print(
             Panel(
-                "Type a coding task. Commands: /help /new /session /plan /think /tokens /diff /clear /exit",
+                "Type a coding task. Commands: /help /new /session /plan /think /tokens /diff /skill-eval /clear /exit",
                 title="NovaCode",
                 border_style="blue",
             )
@@ -536,10 +556,14 @@ class TUI:
             if task.startswith("/"):
                 cmd = task.split()[0].lower()
                 if cmd in {"/exit", "/quit"}:
+                    if session is not None and hasattr(harness, "dormancy_episode"):
+                        harness.dormancy_episode(session)
                     break
                 if cmd == "/help":
                     self._show_help()
                 elif cmd == "/new":
+                    if session is not None and hasattr(harness, "supersede_episode"):
+                        harness.supersede_episode(session)
                     session = None
                     self._thinking_blocks.clear()
                     self._total_usage = {
@@ -560,12 +584,14 @@ class TUI:
                 elif cmd in {"/diff", "/status"}:
                     ws = getattr(harness, "workspace", None)
                     self._show_git_status(ws)
+                elif cmd == "/skill-eval":
+                    self._show_skill_eval(harness)
                 elif cmd in {"/clear", "/cls"}:
                     self.console.clear()
                 else:
                     self.console.print(
                         Text(
-                            "Commands: /help /new /session /plan /think /tokens /diff /clear /exit",
+                            "Commands: /help /new /session /plan /think /tokens /diff /skill-eval /clear /exit",
                             style="dim",
                         )
                     )
@@ -580,6 +606,8 @@ class TUI:
         try:
             result = harness.run_task(session, task)
         except KeyboardInterrupt:
+            if hasattr(harness, "cancel_episode"):
+                harness.cancel_episode(session)
             self.console.print(Text("\n[Task cancelled by user]", style="yellow bold"))
             return None
         except Exception as exc:

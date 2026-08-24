@@ -121,7 +121,24 @@ Sessions are written to `.sessions/<session_id>.json` and traces to
 ## Tools
 
 `read_file`, `write_file`, `edit_file`, `list_files`, `search_files`,
-`grep_search`, `run_shell`, `subagent`.
+`grep_search`, `run_shell`, `subagent`, plus the static meta-tools
+`invoke_skill` and `report_task_outcome`.
+
+## Skills and task episodes
+
+Reusable skills are discovered from `.agent/skills/<name>/SKILL.md` and
+`~/.novacode/skills/<name>/SKILL.md` (project entries take precedence). Skills
+are loaded on demand through the fixed `invoke_skill` schema, so adding a skill
+does not change the prompt/tool prefix. Structured-context sessions also store
+multi-turn episode transitions in `episodes.jsonl`; a turn only completes an
+episode after `report_task_outcome(disposition="completion_proposed", ...)`
+passes the deterministic evidence and verification gate.
+
+Inspect the bank and pending evolution window without an LLM call:
+
+```bash
+python main.py --skill-eval --workspace ./myproject
+```
 
 Filesystem tools resolve every path through one workspace guard that rejects
 absolute paths, `..` traversal and symlink escapes. `run_shell` runs with the

@@ -51,7 +51,7 @@ def _tool_error_to_result(func: Callable[..., ToolResult]) -> Callable[..., Tool
 
 def build_filesystem_tools(workspace: Path, *, protected_rel: list[str] | None = None) -> list[Tool]:
     root = workspace
-    protected = [part.strip("/") for part in protected_rel or [] if part.strip("/")]
+    protected = [Path(part.strip("/")) for part in protected_rel or [] if part.strip("/")]
 
     def is_protected(target: Path) -> bool:
         if not protected:
@@ -60,7 +60,7 @@ def build_filesystem_tools(workspace: Path, *, protected_rel: list[str] | None =
             rel = target.relative_to(root)
         except ValueError:
             return False
-        return bool(rel.parts and rel.parts[0] in protected)
+        return any(rel == item or rel.is_relative_to(item) for item in protected)
 
     def guard_protected(target: Path) -> None:
         if is_protected(target):

@@ -51,6 +51,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--memory-dir", default=None, help="Project memory storage directory")
     parser.add_argument("--memory-global-dir", default=None, help="Global memory storage directory")
     parser.add_argument("--env-file", default=None, help="Path to .env file (default: ./.env)")
+    parser.add_argument(
+        "--skill-eval",
+        action="store_true",
+        help="Show the skill bank/evolution status as JSON and exit without an LLM call",
+    )
+    parser.add_argument("--skill-project-dir", default=None, help="Project skill bank directory")
+    parser.add_argument("--skill-user-dir", default=None, help="User-level skill bank directory")
+    parser.add_argument("--no-skills", action="store_true", help="Disable skills meta-tools")
+    parser.add_argument(
+        "--no-skill-evolution", action="store_true", help="Disable pending candidate extraction"
+    )
     return parser.parse_args(argv)
 
 
@@ -126,6 +137,16 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
 
     # Project memory is ALWAYS located under the project workspace (.agent/memories)
     memory_project_dir = Path(args.memory_dir or os.getenv("NOVACODE_MEMORY_DIR") or (workspace / ".agent" / "memories"))
+    skill_project_dir = Path(
+        args.skill_project_dir
+        or os.getenv("NOVACODE_SKILL_PROJECT_DIR")
+        or (workspace / ".agent" / "skills")
+    )
+    skill_user_dir = Path(
+        args.skill_user_dir
+        or os.getenv("NOVACODE_SKILL_USER_DIR")
+        or (Path.home() / ".novacode" / "skills")
+    )
 
     # Global user memory is in ~/.novacode/memories/global or novacode/.agent/memories/global
     if args.memory_global_dir or os.getenv("NOVACODE_MEMORY_GLOBAL_DIR"):
@@ -137,12 +158,22 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
 
     if storage_location == "user":
         user_root = Path.home() / ".novacode" / "projects" / workspace_slug
-        agent_dir = Path(args.agent_dir or os.getenv("NOVACODE_AGENT_DIR") or user_root)
+        configured_agent_dir = args.agent_dir or os.getenv("NOVACODE_AGENT_DIR")
+        if configured_agent_dir:
+            configured_path = Path(configured_agent_dir).expanduser()
+            agent_dir = configured_path if configured_path.is_absolute() else user_root / configured_path
+        else:
+            agent_dir = user_root
         session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR") or (agent_dir / "sessions"))
         trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR") or (agent_dir / "traces"))
     else:
         # project mode
-        agent_dir = Path(args.agent_dir or os.getenv("NOVACODE_AGENT_DIR") or (workspace / ".agent"))
+        configured_agent_dir = args.agent_dir or os.getenv("NOVACODE_AGENT_DIR")
+        if configured_agent_dir:
+            configured_path = Path(configured_agent_dir).expanduser()
+            agent_dir = configured_path if configured_path.is_absolute() else workspace / configured_path
+        else:
+            agent_dir = workspace / ".agent"
         if structured_context:
             session_dir = Path(args.session_dir or os.getenv("NOVACODE_SESSION_DIR") or (agent_dir / "sessions"))
             trace_dir = Path(args.trace_dir or os.getenv("NOVACODE_TRACE_DIR") or (agent_dir / "traces"))
@@ -165,6 +196,14 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
         global_memory_location=global_memory_location,  # type: ignore[arg-type]
         memory_project_dir=memory_project_dir,
         memory_global_dir=memory_global_dir,
+        skills_enabled=not args.no_skills and not _truthy(os.getenv("NOVACODE_DISABLE_SKILLS")),
+        skill_project_dir=skill_project_dir,
+        skill_user_dir=skill_user_dir,
+        skill_inline_token_limit=max(100, int(os.getenv("NOVACODE_SKILL_INLINE_TOKENS", "2000"))),
+        skill_evolution_enabled=(
+            not args.no_skill_evolution
+            and not _truthy(os.getenv("NOVACODE_DISABLE_SKILL_EVOLUTION"))
+        ),
     )
 
 
@@ -178,6 +217,18 @@ def main(argv: list[str] | None = None) -> int:
     config = build_config(args)
     print(f"[config] provider={config.llm.provider} model={config.llm.model}")
     tui = TUI()
+
+    if args.skill_eval:
+        import json
+
+        from coding_agent.skills.eval import skill_evaluation_status
+
+        status = skill_evaluation_status(
+            project_dir=config.skill_project_dir or (config.workspace / ".agent" / "skills"),
+            user_dir=config.skill_user_dir,
+        )
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        return 0
 
     if args.list_sessions:
         if config.structured_context_enabled:
